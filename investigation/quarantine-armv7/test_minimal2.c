@@ -1,0 +1,9 @@
+#include <3ds.h>
+int main(int argc, char **argv) {
+    gfxInitDefault();
+    consoleInit(GFX_TOP, NULL);
+    printf("Hello!\n");
+    while(1) { gspWaitForVBlank(); hidScanInput(); if(hidKeysHeld()&KEY_A) break; }
+    gfxExit();
+    return 0;
+}

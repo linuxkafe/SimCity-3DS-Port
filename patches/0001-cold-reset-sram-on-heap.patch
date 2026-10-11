@@ -1,0 +1,67 @@
+Subject: [PATCH] core: keep the preserved-SRAM buffer off the stack in cold_reset
+
+cold_reset() declared `uint8_t preserved_sram[SC_V11_SRAM_SIZE]` as an
+automatic variable. SC_V11_SRAM_SIZE is 32768, so the function reserved a
+32 KiB slice of the stack unconditionally -- even on a cold boot, where
+preserve_sram is 0 and the buffer is never read.
+
+On a desktop host the default 8 MiB stack absorbs this silently. The
+Nintendo 3DS ARM11 gives a 3DSX homebrew process a far smaller stack, so
+the reservation overflows it before any emulation runs. The observed
+symptom is a data abort with translation-section fault raised inside
+simcity_recomp_create(), which calls cold_reset() on the cold-boot path.
+
+Allocate the buffer on the heap only when a warm reset actually needs it,
+and free it once the SRAM has been restored. The cold-boot path now
+allocates nothing and consumes no stack.
+
+No behavioural change on hosts where the previous version worked: the
+copy-out/copy-in sequence and the sram_dirty handling are identical.
+
+--- pa/src/simcity_static_recomp.c	2026-10-11 12:39:30.082930050 +0100
++++ pb/src/simcity_static_recomp.c	2026-10-11 12:39:30.086930101 +0100
+@@ -488,7 +488,7 @@
+ 
+ static int cold_reset(SimCityRecomp *instance, char *error,
+                       size_t error_capacity) {
+-    uint8_t preserved_sram[SC_V11_SRAM_SIZE];
++    uint8_t *preserved_sram = NULL;
+     uint8_t preserved_sram_dirty = 0u;
+     int preserve_sram = 0;
+     if (!instance || !instance->runtime || !instance->rom) {
+@@ -499,7 +499,19 @@
+ 
+     preserve_sram = instance->initialized != 0u;
+     if (preserve_sram) {
+-        memcpy(preserved_sram, instance->runtime->sram, sizeof(preserved_sram));
++        /* Portability patch (see patches/0001-cold-reset-sram-on-heap.patch):
++           the previous automatic 32 KiB buffer lived on the stack, which the
++           Nintendo 3DS ARM11 cannot provide (stack overflow -> data abort).
++           Allocate on the heap only when a warm reset actually needs it; the
++           cold-boot path allocates nothing. */
++        preserved_sram = (uint8_t *)malloc(SC_V11_SRAM_SIZE);
++        if (!preserved_sram) {
++            set_error(instance,
++                      "Unable to allocate the preserved SRAM buffer.",
++                      error, error_capacity);
++            return 0;
++        }
++        memcpy(preserved_sram, instance->runtime->sram, SC_V11_SRAM_SIZE);
+         preserved_sram_dirty = instance->runtime->sram_dirty;
+     }
+ 
+@@ -517,10 +529,12 @@
+ 
+     sc_v11_runtime_init(instance->runtime, instance->rom,
+                         SIMCITY_RECOMP_ROM_SIZE);
+-    if (preserve_sram) {
+-        memcpy(instance->runtime->sram, preserved_sram, sizeof(preserved_sram));
++    if (preserved_sram) {
++        memcpy(instance->runtime->sram, preserved_sram, SC_V11_SRAM_SIZE);
+         instance->runtime->sram_dirty = preserved_sram_dirty;
+     }
++    free(preserved_sram);
++    preserved_sram = NULL;
+     instance->initialized = 1u;
+     sc_v11_set_audio_sink(instance->runtime, audio_sink, instance);
+     if (instance->runtime->route_failed) {
