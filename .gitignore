@@ -17,3 +17,11 @@ simcity.3dsx
 !.aes/handoffs/
 !.aes/verification/
 !.aes/shadow/
+# ROM files
+*.sfc
+*.smc
+*.rom
+*.bin
+*.cia
+*.3dsx
+*.elf
