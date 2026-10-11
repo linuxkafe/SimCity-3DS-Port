@@ -10,13 +10,7 @@ simcity.3dsx
 .simcity-ds-build*
 .simcity-3ds-build*
 .aes/
-!aes/
-!.aes/kanban.md
-!.aes/sprints/
-!.aes/tickets/
-!.aes/handoffs/
-!.aes/verification/
-!.aes/shadow/
+aes/
 # ROM files
 *.sfc
 *.smc
