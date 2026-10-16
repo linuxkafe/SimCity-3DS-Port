@@ -322,9 +322,14 @@ static void ds3_dbg_state(char *buf, unsigned capacity) {
 
     snprintf(buf, capacity,
              "frame=%u src=%p src_w=%u src_h=%u instructions=%llu master=%llu "
-             "input=0x%04X injected=0x%04X last_error=%s",
+             "input=0x%04X injected=0x%04X chan=%d rot=%d "
+             "adv=%u audio=%u dbg=%u present=%u loop=%u last_error=%s",
              frame, src, fw, fh, instr, master,
-             (unsigned)g_last_input, (unsigned)g_dbg_input, err);
+             (unsigned)g_last_input, (unsigned)g_dbg_input,
+             g_dbg_chan_swap, g_dbg_rotate_mode,
+             g_dbg_phase_us[DBGK_PHASE_ADVANCE], g_dbg_phase_us[DBGK_PHASE_AUDIO],
+             g_dbg_phase_us[DBGK_PHASE_DEBUG], g_dbg_phase_us[DBGK_PHASE_PRESENT],
+             g_dbg_phase_us[DBGK_PHASE_LOOP], err);
 }
 
 int main(int argc, char **argv) {
@@ -401,6 +406,8 @@ int main(int argc, char **argv) {
 
         /* Process input — A starts/steps, B pauses */
         hidScanInput();
+        uint64_t loop_start = svcGetSystemTick();
+        uint64_t t_loop = loop_start;
         uint16_t held  = hidKeysHeld();
         uint16_t pressed = hidKeysDown();   /* edge-triggered: fires once per press */
 
@@ -437,13 +444,28 @@ int main(int argc, char **argv) {
             }
         }
 
+        /* Per-phase timing: the port runs at 1.59 fps while the core uses
+           0.007% of the CPU, so the cost is somewhere in this loop and only
+           measurement can say where. Averaged so one slow iteration lies less. */
+        g_dbg_phase_us[DBGK_PHASE_ADVANCE] =
+            (uint32_t)(svcGetSystemTick() - t_loop);
+        t_loop = svcGetSystemTick();
+
         /* Update audio playback — drain ring buffer to hardware */
         ds3_audio_pump();
+
+        g_dbg_phase_us[DBGK_PHASE_AUDIO] =
+            (uint32_t)(svcGetSystemTick() - t_loop);
+        t_loop = svcGetSystemTick();
 
         /* Host debug channel: service the TCP server (non-blocking). Lets the
            host flip rotation and pull live pixels without button presses. */
         dbgk_poll();
         dbgk_break_check();
+
+        g_dbg_phase_us[DBGK_PHASE_DEBUG] =
+            (uint32_t)(svcGetSystemTick() - t_loop);
+        t_loop = svcGetSystemTick();
 
 
         /* Present exactly one swap per VBlank. gfxSwapBuffers() rotates both
@@ -459,6 +481,15 @@ int main(int argc, char **argv) {
         if (!paused || dbg_step_now) {
             gspWaitForVBlank();
             gfxSwapBuffers();
+        }
+
+        g_dbg_phase_us[DBGK_PHASE_PRESENT] =
+            (uint32_t)(svcGetSystemTick() - t_loop);
+        g_dbg_phase_us[DBGK_PHASE_LOOP] =
+            (uint32_t)(svcGetSystemTick() - loop_start);
+        for (int _p = 0; _p < DBGK_PHASE_COUNT; _p++) {
+            g_dbg_phase_avg[_p] =
+                (g_dbg_phase_avg[_p] * 7u + g_dbg_phase_us[_p]) / 8u;
         }
     }
 

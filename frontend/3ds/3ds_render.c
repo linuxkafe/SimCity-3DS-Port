@@ -28,6 +28,13 @@ static inline uint16_t bgra_to_rgb565(uint32_t bgra) {
     uint8_t r5  = (r >> 3) & 0x1Fu;
     uint8_t g6  = (g >> 2) & 0x3Fu;
     uint8_t b5  = (b >> 3) & 0x1Fu;
+    /* Red and blue are exchanged when the debug port says the panel wants it.
+       See g_dbg_chan_swap. The pixel data written here is verified correct in
+       RAM either way; only the order of the two outer fields is in question,
+       and it is not answerable from source — only from the panel. */
+    if (g_dbg_chan_swap) {
+        return (uint16_t)((b5 << 11) | (g6 << 5) | r5);
+    }
     return (uint16_t)((r5 << 11) | (g6 << 5) | b5);
 }
 

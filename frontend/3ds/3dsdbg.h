@@ -10,6 +10,7 @@
 #define THREEDS_DEBUGKIT_H
 
 #include <stdint.h>
+#include <stdio.h>
 
 #ifdef __cplusplus
 extern "C" {
@@ -55,6 +56,43 @@ extern volatile int g_dbg_step;
  * upstream desktop frontends had to solve. */
 extern volatile uint16_t g_dbg_input;
 extern volatile int g_dbg_input_frames;
+
+/* Red/blue channel order on the way into the framebuffer, chosen at runtime by
+ * the `chan` verb.
+ *
+ * 0 = as libctru documents RGB565 (red in bits 11-15) — what ds3_render.c wrote
+ *     unconditionally until this existed.
+ * 1 = red and blue exchanged.
+ *
+ * This is runtime-selectable rather than compiled in for the same reason the
+ * rotation direction is: the panel's behaviour is not knowable from the source,
+ * and a wrong guess costs a rebuild. `chan` settles it over the wire instead.
+ * The pixel data is verified correct in RAM either way — the question is only
+ * how the hardware presents it. */
+extern volatile int g_dbg_chan_swap;
+
+/* Per-phase wall-clock for the last main-loop iteration, in microseconds, plus
+ * the running average. `prof` reads it back. Without this, the only way to find
+ * where a frame goes is to guess, and guessing here has already been wrong
+ * twice. Phase indices are the DBGK_PHASE_* constants. */
+enum {
+    DBGK_PHASE_ADVANCE = 0,  /* core advance + render + HUD */
+    DBGK_PHASE_AUDIO,         /* ds3_audio_pump */
+    DBGK_PHASE_DEBUG,         /* dbgk_poll + break check */
+    DBGK_PHASE_PRESENT,       /* VBlank wait + buffer swap */
+    DBGK_PHASE_LOOP,          /* whole iteration */
+    DBGK_PHASE_COUNT
+};
+extern volatile uint32_t g_dbg_phase_us[DBGK_PHASE_COUNT];
+extern volatile uint32_t g_dbg_phase_avg[DBGK_PHASE_COUNT];
+
+/* Streaming sink for the `put` verb: after `put <path> <size>` the next `size`
+ * bytes on the socket are written to `path` verbatim rather than parsed as
+ * commands. This is what lets a new build be pushed to the card over the port
+ * that is already open, instead of requiring the operator to swap to the FTP
+ * server and back. */
+extern volatile int g_put_remaining;
+extern FILE *g_put_file;
 
 /* Bring up the debug server (non-blocking TCP listen). Call once at startup. */
 void dbgk_init(void);

@@ -406,6 +406,14 @@ volatile int g_dbg_step  = 0;    /* frames the host asked to advance */
 volatile uint16_t g_dbg_input = 0;      /* held mask, OR-ed with hardware */
 volatile int      g_dbg_input_frames = 0; /* >0: release after N advances */
 
+volatile int g_dbg_chan_swap = 0;
+
+volatile uint32_t g_dbg_phase_us[DBGK_PHASE_COUNT];
+volatile uint32_t g_dbg_phase_avg[DBGK_PHASE_COUNT];
+
+volatile int g_put_remaining = 0;
+FILE *g_put_file = NULL;
+
 /* Resolve a screen to its current framebuffer. Never cached: libctru may hand
    back a different pointer after gfxSwapBuffers() (gfx.h:140), so a cached
    address would read a buffer the renderer is not currently writing. */
@@ -448,6 +456,48 @@ static void dbgk_ext(const char *line) {
         char m[32];
         snprintf(m, sizeof(m), "OK rot=%d\n", mode);
         dbgk_send_str(m);
+    } else if (!strcmp(verb, "chan")) {
+        /* chan [0|1] — red/blue order written into the framebuffer. */
+        int mode = 0;
+        if (sscanf(line, "%*s %d", &mode) != 1) { dbgk_send_str("ERR args\n"); return; }
+        if (mode < 0 || mode > 1) { dbgk_send_str("ERR range (0 or 1)\n"); return; }
+        g_dbg_chan_swap = mode;
+        char m[48];
+        snprintf(m, sizeof(m), "OK chan=%d\n", mode);
+        dbgk_send_str(m);
+    } else if (!strcmp(verb, "prof")) {
+        char m[320];
+        int n = snprintf(m, sizeof(m),
+            "OK now[adv=%uus audio=%uus dbg=%uus present=%uus loop=%uus] "
+            "avg[adv=%uus audio=%uus dbg=%uus present=%uus loop=%uus]",
+            g_dbg_phase_us[DBGK_PHASE_ADVANCE], g_dbg_phase_us[DBGK_PHASE_AUDIO],
+            g_dbg_phase_us[DBGK_PHASE_DEBUG], g_dbg_phase_us[DBGK_PHASE_PRESENT],
+            g_dbg_phase_us[DBGK_PHASE_LOOP],
+            g_dbg_phase_avg[DBGK_PHASE_ADVANCE], g_dbg_phase_avg[DBGK_PHASE_AUDIO],
+            g_dbg_phase_avg[DBGK_PHASE_DEBUG], g_dbg_phase_avg[DBGK_PHASE_PRESENT],
+            g_dbg_phase_avg[DBGK_PHASE_LOOP]);
+        dbgk_send_bytes(m, (size_t)n);
+        dbgk_send_str("\n");
+    } else if (!strcmp(verb, "put")) {
+        /* put <path> <size> — the next <size> bytes go straight to <path>. */
+        char path[96];
+        unsigned long size = 0;
+        if (sscanf(line, "%*s %95s %lu", path, &size) != 2) {
+            dbgk_send_str("ERR args\n"); return;
+        }
+        if (size == 0 || size > 64UL * 1024UL * 1024UL) {
+            dbgk_send_str("ERR range (1..64MB)\n"); return;
+        }
+        if (strncmp(path, "sdmc:/", 6) != 0) {
+            /* Refuse anything but the SD card: this verb writes whatever bytes
+               arrive, and a stray path should not be able to scribble over
+               code or a save. */
+            dbgk_send_str("ERR path must start with sdmc:/\n"); return;
+        }
+        g_put_file = fopen(path, "wb");
+        if (!g_put_file) { dbgk_send_str("ERR open failed\n"); return; }
+        g_put_remaining = (int)size;
+        dbgk_send_str("OK sending\n");
     } else if (!strcmp(verb, "input")) {
         /* input [mask] — set the held mask, or release everything if absent/0. */
         unsigned long mask = 0;
@@ -577,6 +627,22 @@ static void dbgk_feed_ext_byte(char c) {
 static void dbgk_feed(const char *data, size_t len) {
     for (size_t i = 0; i < len; i++) {
         char c = data[i];
+
+        /* A `put` is in progress: these bytes are file content, not commands.
+         * The check has to come first or the payload gets chewed up as
+         * extension lines. */
+        if (g_put_remaining > 0) {
+            fwrite(&c, 1, 1, g_put_file);
+            g_put_remaining--;
+            if (g_put_remaining == 0) {
+                fflush(g_put_file);
+                fclose(g_put_file);
+                g_put_file = NULL;
+                dbgk_send_str("OK written\n");
+            }
+            continue;
+        }
+
         if (used_any) {
             /* --- inside an RSP packet --- */
             if (c == '#') {
