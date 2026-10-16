@@ -329,7 +329,7 @@ int main(int argc, char **argv) {
      * off libctru's own header rather than assuming it is what "default" means.
      * The third argument (false) keeps framebuffers in linear DRAM, not VRAM —
      * gfxInitDefault's behaviour, and correct for a 240x400 double buffer. */
-    gfxInitDefault(); /* TEMPORARILY REVERTED FOR COMMIT SPLIT */
+    gfxInit(GSP_RGB565_OES, GSP_RGB565_OES, false);
 
     /* Console on bottom screen only — top screen is reserved for the game frame.
        Placing the text console on the top screen overwrote the framebuffer with

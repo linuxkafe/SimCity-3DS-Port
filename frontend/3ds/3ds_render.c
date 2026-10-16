@@ -103,23 +103,47 @@ void ds3_render_frame(const uint32_t *src,
 
     /* Place the landscape source into the portrait framebuffer.
 
-       Orientation was settled empirically, not guessed: a pixel dump of the
-       real device (SELECT -> sdmc:/dbg_fb.raw, converted by tools/raw2png.py)
-       was replayed offline through every candidate mapping. The LCD presents
-       the portrait framebuffer rotated 90 deg counter-clockwise (gfx.h:9), so
-       the correct payload to store is the source rotated 90 deg CLOCKWISE:
+       MEASURED, NOT GUESSED (T021). A paused framebuffer capture was pulled off
+       the device over the debug port and compared against the core frame across
+       all eight dihedral transforms. The previous code emitted
 
-           rotate CW:  source (x, y)  ->  dest (rows - 1 - y, x)
+           dest(dy, dx) = src(row = dx, col = dy)
 
-       That yields a destination footprint of (source height) wide by
-       (source width) tall, which is centred in the portrait framebuffer.
-       Composed with the panel's own rotation this produces the upright title
-       screen; the alternative direction renders it upside-down. */
+       which is a TRANSPOSE — a reflection across the main diagonal, not a
+       rotation. It matches 44% of content pixels within quantisation tolerance
+       against 8% for the next candidate, and re-rendering the core frame under
+       that mapping reproduces the captured framebuffer pixel for pixel
+       (debug/net/pred_A.png vs debug/net/fb_top_paused.png). A transpose flips
+       handedness, so no panel rotation can undo it: the screen can only ever
+       show a mirrored image.
+
+       A rotation is required, and the footprint pins the family. The source is
+       src_width x src_height (256x239) and the destination is dst_h tall by
+       dst_w wide (239x256), so the mapping must turn one into the other — only
+       a quarter turn fits. Rotating the source 90 degrees CLOCKWISE places
+       source pixel (r, c) at (row c, col height-1-r):
+
+           dest(dy, dx) = src(row = rows-1-dx, col = dy)
+
+       The 3DS top panel then presents the portrait framebuffer rotated 90
+       degrees counter-clockwise (gfx.h:9), which brings it upright.
+
+       That panel direction is the one remaining assumption in this file, so it is
+       made runtime-selectable rather than baked in. `g_dbg_rotate_mode` (set
+       from the debug port with the `rot` verb) chooses the quarter turn:
+         -1 (default) / 0 = 90 CW,  1 = 90 CCW.
+       Flipping it is a network round trip instead of a rebuild, which is how the
+       direction gets settled on hardware instead of argued about. The choice is
+       read once per frame, outside both loops, so it costs nothing per pixel. */
+    const unsigned src_h_local = rows;
+    /* Hoisted out of the pixel loops: g_dbg_rotate_mode can change between
+       frames and a frame must never mix the two mappings. */
+    const int use_ccw = (g_dbg_rotate_mode == 1);
 
     for (unsigned dy = 0; dy < dst_h; dy++) {
         for (unsigned dx = 0; dx < dst_w; dx++) {
-            /* dest column dx tracks a source row, dest row dy a source column */
-            unsigned sy = dx;
+            /* dest column dx tracks a source row; dest row dy a source column */
+            unsigned sy = use_ccw ? dx : (src_h_local - 1u - dx);
             unsigned sx = dy;
             if (sy >= rows)   sy = rows - 1u;
             if (sx >= row_pixels) sx = row_pixels - 1u;
