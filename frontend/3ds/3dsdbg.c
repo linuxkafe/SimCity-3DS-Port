@@ -403,6 +403,9 @@ void dbgk_set_state_fn(dbgk_state_fn fn) { g_state_fn = fn; }
 volatile int g_dbg_pause = -1;   /* -1 = host not driving */
 volatile int g_dbg_step  = 0;    /* frames the host asked to advance */
 
+volatile uint16_t g_dbg_input = 0;      /* held mask, OR-ed with hardware */
+volatile int      g_dbg_input_frames = 0; /* >0: release after N advances */
+
 /* Resolve a screen to its current framebuffer. Never cached: libctru may hand
    back a different pointer after gfxSwapBuffers() (gfx.h:140), so a cached
    address would read a buffer the renderer is not currently writing. */
@@ -444,6 +447,34 @@ static void dbgk_ext(const char *line) {
         g_dbg_rotate_mode = mode;
         char m[32];
         snprintf(m, sizeof(m), "OK rot=%d\n", mode);
+        dbgk_send_str(m);
+    } else if (!strcmp(verb, "input")) {
+        /* input [mask] — set the held mask, or release everything if absent/0. */
+        unsigned long mask = 0;
+        if (sscanf(line, "%*s %lx", &mask) < 1) mask = 0;
+        if (mask > 0xFFFFu) { dbgk_send_str("ERR range\n"); return; }
+        g_dbg_input = (uint16_t)mask;
+        g_dbg_input_frames = 0;
+        char m[48];
+        snprintf(m, sizeof(m), "OK input=0x%04X\n", (unsigned)g_dbg_input);
+        dbgk_send_str(m);
+    } else if (!strcmp(verb, "tap")) {
+        /* tap <mask> [frames] — hold the mask for N advanced frames, then release.
+           Frames below 2 are refused: a one-frame pulse can fall entirely
+           between two emulated frames and the guest would never sample it. */
+        unsigned long mask = 0;
+        int frames = 2;
+        if (sscanf(line, "%*s %lx %d", &mask, &frames) < 1) {
+            dbgk_send_str("ERR args\n"); return;
+        }
+        if (mask > 0xFFFFu || frames < 2 || frames > 600) {
+            dbgk_send_str("ERR range (mask<=0xFFFF, frames 2..600)\n"); return;
+        }
+        g_dbg_input = (uint16_t)mask;
+        g_dbg_input_frames = frames;
+        char m[64];
+        snprintf(m, sizeof(m), "OK tap=0x%04X frames=%d\n",
+                 (unsigned)g_dbg_input, frames);
         dbgk_send_str(m);
     } else if (!strcmp(verb, "pause")) {
         g_dbg_pause = 1;

@@ -9,6 +9,8 @@
 #ifndef THREEDS_DEBUGKIT_H
 #define THREEDS_DEBUGKIT_H
 
+#include <stdint.h>
+
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -38,6 +40,21 @@ void dbgk_set_state_fn(dbgk_state_fn fn);
  * it one frame at a time so "advance N, then look" is deterministic. */
 extern volatile int g_dbg_pause;
 extern volatile int g_dbg_step;
+
+/* Host-injected controller state, in the SNES bit layout the core expects
+ * (SimCityRecompInput: A=0x0080, START=0x1000, UP=0x0800, ...).
+ *
+ * g_dbg_input is OR-ed into whatever the hardware reports, so a test can hold a
+ * direction while the operator still plays, or drive the whole pad with nobody
+ * touching the device.
+ *
+ * g_dbg_input_frames, when non-zero, releases the mask after that many advanced
+ * frames. This matters: a press sampled only in held-state between two emulated
+ * frames is never seen by the guest at all. A pulse therefore has to span at
+ * least two frames to be guaranteed observed — the same short-press hazard the
+ * upstream desktop frontends had to solve. */
+extern volatile uint16_t g_dbg_input;
+extern volatile int g_dbg_input_frames;
 
 /* Bring up the debug server (non-blocking TCP listen). Call once at startup. */
 void dbgk_init(void);

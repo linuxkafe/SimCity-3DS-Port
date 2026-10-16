@@ -108,6 +108,10 @@ static void ds3_trace(const char *fmt, ...) {
 SimCityRecomp *g_recomp = NULL;
 uint8_t        g_rom_loaded = 0;
 char           g_last_error[256] = "";
+/* Last mask handed to simcity_recomp_advance(), surfaced through `state` so an
+   injected press can be confirmed to have reached the guest. */
+static volatile uint16_t g_last_input = 0;
+
 
 /* Soft pointer state (mimics Linux frontend's soft_mouse) */
 int g_soft_pointer = 1;
@@ -227,6 +231,16 @@ SimCityRecompFrameResult ds3_advance_frame(void) {
     uint16_t input = ds3_input_read();
     ds3_input_update_soft_pointer();
 
+    /* Record what was actually handed to the core, and retire a `tap` pulse
+       once it has spanned enough frames to have been sampled. The host reads
+       this back through `state`, so an injected press is *verified* to have
+       reached the guest rather than assumed from a zero exit code. */
+    g_last_input = input;
+    if (g_dbg_input_frames > 0) {
+        g_dbg_input_frames--;
+        if (g_dbg_input_frames == 0) g_dbg_input = 0;
+    }
+
     ds3_trace("[T5] advance_frame: entering simcity_recomp_advance");
     /* Advance one SNES frame */
     int rc = simcity_recomp_advance(g_recomp, input, 1u, &result);
@@ -308,8 +322,9 @@ static void ds3_dbg_state(char *buf, unsigned capacity) {
 
     snprintf(buf, capacity,
              "frame=%u src=%p src_w=%u src_h=%u instructions=%llu master=%llu "
-             "last_error=%s",
-             frame, src, fw, fh, instr, master, err);
+             "input=0x%04X injected=0x%04X last_error=%s",
+             frame, src, fw, fh, instr, master,
+             (unsigned)g_last_input, (unsigned)g_dbg_input, err);
 }
 
 int main(int argc, char **argv) {

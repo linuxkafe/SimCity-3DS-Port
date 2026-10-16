@@ -3,6 +3,7 @@
  */
 
 #include "3ds_input.h"
+#include "3dsdbg.h"
 #include "3ds_main.h"
 
 #include <3ds.h>
@@ -38,6 +39,10 @@ uint16_t ds3_input_read(void) {
         /* Trigger soft reset via flag */
         g_soft_pointer = 1;  /* Just a placeholder - actual reset handled in main */
     }
+
+    /* Host-injected buttons, OR-ed in rather than replacing: a test can hold a
+       direction while the operator keeps playing, or drive the pad alone. */
+    mask |= g_dbg_input;
 
     return mask;
 }
