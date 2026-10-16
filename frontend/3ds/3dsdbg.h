@@ -97,6 +97,17 @@ extern FILE *g_put_file;
 /* Bring up the debug server (non-blocking TCP listen). Call once at startup. */
 void dbgk_init(void);
 
+/* Tear the server down: close both sockets and release the soc:u context.
+   Without this the port stays bound after the app leaves, which makes the next
+   run look like a dead device rather than a closed app. */
+void dbgk_exit(void);
+
+/* Set by the `quit` verb. The main loop checks it and unwinds cleanly so the
+   3DSX loader can hand control back to the Home Menu — otherwise the only way
+   out is holding the power button, which is not something to ask the operator
+   to do between every test. */
+extern volatile int g_dbg_quit;
+
 /* Service the server: accept a client, read commands, reply. Non-blocking;
    call once per iteration of the host application's main loop. */
 void dbgk_poll(void);

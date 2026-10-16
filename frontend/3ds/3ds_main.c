@@ -373,7 +373,7 @@ int main(int argc, char **argv) {
     printf("\x1b[1;1;37mSimCity 3DS\x1b[0m\n");
     printf("ROM: %s\n", ROM_PATH);
     printf("Top: 256x240 | Bot: 256x240\n");
-    printf("Press A to start, SELECT+START+L+R to reset.\n");
+    printf("Press A to start. SELECT+START to exit to the Home Menu.\n");
     printf("\n");
 
     /* Initial core init */
@@ -410,6 +410,16 @@ int main(int argc, char **argv) {
         uint64_t t_loop = loop_start;
         uint16_t held  = hidKeysHeld();
         uint16_t pressed = hidKeysDown();   /* edge-triggered: fires once per press */
+
+        /* Two ways out, because forcing the operator to hold the power button
+           between every test is not a workflow. SELECT+START on the device, or
+           the `quit` verb from the host. Both unwind through the same shutdown
+           path so the 3DSX loader gets to return to the Home Menu. */
+        if (g_dbg_quit ||
+            ((pressed & (KEY_SELECT | KEY_START)) == (KEY_SELECT | KEY_START))) {
+            ds3_trace("exit: quit requested (verb=%d)", g_dbg_quit);
+            break;
+        }
 
         /* Auto-advance: run one emulated frame every loop iteration so the
            game plays without any button input. START toggles pause; A still
@@ -496,10 +506,17 @@ int main(int argc, char **argv) {
     /* Shutdown */
     ds3_trace("shutdown: frames_advanced=%lu", trace_frames);
     ds3_trace_close();
-    ds3_shutdown();
-    ds3_audio_exit();
-    ds3_render_exit();
 
-    printf("\nShutting down.\n");
+    /* Order matters: the network port is closed before the services it was
+       serving come down, and gfx goes last so anything still drawing has a
+       framebuffer to draw into. Leaving the socket bound makes the next run
+       look like a dead device rather than a closed app. */
+    printf("\nShutting down...\n");
+    ds3_render_exit();
+    ds3_audio_exit();
+    dbgk_exit();
+    ds3_shutdown();
+    gfxExit();
+
     return 0;
 }

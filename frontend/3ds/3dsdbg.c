@@ -407,6 +407,7 @@ volatile uint16_t g_dbg_input = 0;      /* held mask, OR-ed with hardware */
 volatile int      g_dbg_input_frames = 0; /* >0: release after N advances */
 
 volatile int g_dbg_chan_swap = 0;
+volatile int g_dbg_quit = 0;
 
 volatile uint32_t g_dbg_phase_us[DBGK_PHASE_COUNT];
 volatile uint32_t g_dbg_phase_avg[DBGK_PHASE_COUNT];
@@ -456,6 +457,9 @@ static void dbgk_ext(const char *line) {
         char m[32];
         snprintf(m, sizeof(m), "OK rot=%d\n", mode);
         dbgk_send_str(m);
+    } else if (!strcmp(verb, "quit")) {
+        g_dbg_quit = 1;
+        dbgk_send_str("OK quitting\n");
     } else if (!strcmp(verb, "chan")) {
         /* chan [0|1] — red/blue order written into the framebuffer. */
         int mode = 0;
@@ -748,6 +752,18 @@ void dbgk_init(void) {
         printf("[dbgk] listening on %s:%d\n", inet_ntoa(bound.sin_addr), DBGK_PORT);
     else
         printf("[dbgk] listening on :%d\n", DBGK_PORT);
+}
+
+void dbgk_exit(void) {
+    if (g_client_fd >= 0) { close(g_client_fd); g_client_fd = -1; }
+    if (g_listen_fd >= 0) { close(g_listen_fd); g_listen_fd = -1; }
+    if (g_put_file)       { fclose(g_put_file); g_put_file = NULL; }
+    g_put_remaining = 0;
+    if (g_soc_buffer) {
+        socExit();
+        free(g_soc_buffer);
+        g_soc_buffer = NULL;
+    }
 }
 
 void dbgk_poll(void) {
