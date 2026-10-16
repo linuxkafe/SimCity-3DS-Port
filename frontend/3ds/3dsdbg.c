@@ -394,6 +394,33 @@ static void dbgk_handle_rsp(char *pkt) {
 
 /* ── Extension protocol (non-RSP ASCII lines) ───────────────────────── */
 
+/* Application-supplied formatter for the `state` verb. NULL until the host
+   application registers one; the bridge stays game-agnostic. */
+static dbgk_state_fn g_state_fn = NULL;
+
+void dbgk_set_state_fn(dbgk_state_fn fn) { g_state_fn = fn; }
+
+volatile int g_dbg_pause = -1;   /* -1 = host not driving */
+volatile int g_dbg_step  = 0;    /* frames the host asked to advance */
+
+/* Resolve a screen to its current framebuffer. Never cached: libctru may hand
+   back a different pointer after gfxSwapBuffers() (gfx.h:140), so a cached
+   address would read a buffer the renderer is not currently writing. */
+static u8 *dbgk_get_fb(int screen, u16 *w, u16 *h) {
+#ifdef DBGK_HOST_TEST
+    static u16 fake[240 * 400];
+    *w = 240; *h = 400;
+    (void)screen;
+    return (u8 *)fake;
+#else
+    return gfxGetFramebuffer((gfxScreen_t)screen, GFX_LEFT, w, h);
+#endif
+}
+
+/* Reused by `fbrd`; 1 KiB per chunk keeps replies inside one line so the host
+   can read them with an ordinary line read and reassemble in order. */
+static char g_chunk_hex[2 * MAX_RSP_MEM + 1];
+
 static void dbgk_ext(const char *line) {
     char verb[24] = {0}, arg[40] = {0};
     if (sscanf(line, "%23s %39s", verb, arg) < 1) { dbgk_send_str("ERR empty\n"); return; }
@@ -404,6 +431,76 @@ static void dbgk_ext(const char *line) {
         char m[128];
         snprintf(m, sizeof(m), "OK 3dsdbgkit/1 pid=ok breaks=%d\n", g_break_count);
         dbgk_send_str(m);
+    } else if (!strcmp(verb, "state")) {
+        if (!g_state_fn) { dbgk_send_str("ERR nostate\n"); return; }
+        char buf[256];
+        g_state_fn(buf, (unsigned)sizeof(buf));
+        dbgk_send_str("OK ");
+        dbgk_send_str(buf);
+        dbgk_send_str("\n");
+    } else if (!strcmp(verb, "rot")) {
+        int mode = -1;
+        if (sscanf(line, "%*s %d", &mode) != 1) { dbgk_send_str("ERR args\n"); return; }
+        g_dbg_rotate_mode = mode;
+        char m[32];
+        snprintf(m, sizeof(m), "OK rot=%d\n", mode);
+        dbgk_send_str(m);
+    } else if (!strcmp(verb, "pause")) {
+        g_dbg_pause = 1;
+        dbgk_send_str("OK paused\n");
+    } else if (!strcmp(verb, "run")) {
+        g_dbg_pause = 0;
+        dbgk_send_str("OK running\n");
+    } else if (!strcmp(verb, "step")) {
+        int n = 1;
+        if (sscanf(line, "%*s %d", &n) != 1) { dbgk_send_str("ERR args\n"); return; }
+        if (n < 0 || n > 10000) { dbgk_send_str("ERR range\n"); return; }
+        g_dbg_step = n;
+        char m[32];
+        snprintf(m, sizeof(m), "OK step=%d\n", n);
+        dbgk_send_str(m);
+    } else if (!strcmp(verb, "fbsize")) {
+        int screen = 0;
+        u16 w = 0, h = 0;
+        if (sscanf(line, "%*s %d", &screen) != 1) { dbgk_send_str("ERR args\n"); return; }
+        if (!dbgk_get_fb(screen, &w, &h)) { dbgk_send_str("ERR nofb\n"); return; }
+        char m[64];
+        snprintf(m, sizeof(m), "OK %u %u %u\n", (unsigned)w, (unsigned)h,
+                 (unsigned)w * (unsigned)h * 2u);
+        dbgk_send_str(m);
+    } else if (!strcmp(verb, "fbrd")) {
+        /* fbrd <screen> <offset> <length> -> "<offset> <length> <hex>" */
+        unsigned screen = 0, off = 0, len = 0;
+        u16 w = 0, h = 0;
+        if (sscanf(line, "%*s %u %u %u", &screen, &off, &len) != 3) {
+            dbgk_send_str("ERR args\n"); return;
+        }
+        u8 *fb = dbgk_get_fb((int)screen, &w, &h);
+        if (!fb) { dbgk_send_str("ERR nofb\n"); return; }
+        unsigned total = (unsigned)w * (unsigned)h * 2u;
+        if (off > total || len == 0u || len > (unsigned)MAX_RSP_MEM ||
+            off + len > total) {
+            dbgk_send_str("ERR range\n"); return;
+        }
+        static const char H[] = "0123456789abcdef";
+        for (unsigned i = 0; i < len; i++) {
+            g_chunk_hex[i * 2u]     = H[(fb[off + i] >> 4) & 0xF];
+            g_chunk_hex[i * 2u + 1u] = H[ fb[off + i]       & 0xF];
+        }
+        g_chunk_hex[len * 2u] = '\0';
+        char hdr[48];
+        int n = snprintf(hdr, sizeof(hdr), "%u %u ", off, len);
+        dbgk_send_bytes(hdr, (size_t)n);
+        dbgk_send_str(g_chunk_hex);
+        dbgk_send_str("\n");
+    } else if (!strcmp(verb, "fbdump")) {
+        int screen = 0;
+        char path[96];
+        if (sscanf(line, "%*s %d %95s", &screen, path) != 2) {
+            dbgk_send_str("ERR args\n"); return;
+        }
+        dbgk_dump_screen(path, screen);
+        dbgk_send_str("OK dumped\n");
     } else if (!strcmp(verb, "brk")) {
         unsigned long a = strtoul(arg, NULL, 0);
         int rc = dbgk_add_break((uint32_t)a);

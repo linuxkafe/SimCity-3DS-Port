@@ -280,11 +280,56 @@ SimCityRecompFrameResult ds3_advance_frame(void) {
 
 /* ── Main entry point ─────────────────────────────────────────────── */
 
+/* ── Host debug state ──────────────────────────────────────────────── */
+
+/* Feeds the `state` verb on the debug port. The bridge is game-agnostic, so
+   the port cannot read these symbols itself — this is how the host learns where
+   the core's frame lives so it can pull the pixels and compare them against the
+   framebuffer. Everything the host needs to localise a render bug is here. */
+static void ds3_dbg_state(char *buf, unsigned capacity) {
+    /* Every value is cast to the exact type the format string promises.
+     * uint32_t is `unsigned long` on ARM32, so passing it straight to %u is a
+     * format mismatch — and a debug tool that reports the wrong number is worse
+     * than no debug tool at all. */
+    unsigned        frame = 0u, fw = 0u, fh = 0u;
+    unsigned long long instr = 0ull, master = 0ull;
+    const void     *src = NULL;
+    const char     *err = "no-instance";
+
+    if (g_recomp) {
+        frame  = (unsigned)simcity_recomp_current_frame(g_recomp);
+        fw     = (unsigned)simcity_recomp_frame_width(g_recomp);
+        fh     = (unsigned)SIMCITY_RECOMP_FRAME_HEIGHT;
+        src    = (const void *)simcity_recomp_frame_bgra(g_recomp);
+        instr  = (unsigned long long)simcity_recomp_instruction_count(g_recomp);
+        master = (unsigned long long)simcity_recomp_master_clock(g_recomp);
+        err    = simcity_recomp_last_error(g_recomp);
+    }
+
+    snprintf(buf, capacity,
+             "frame=%u src=%p src_w=%u src_h=%u instructions=%llu master=%llu "
+             "last_error=%s",
+             frame, src, fw, fh, instr, master, err);
+}
+
 int main(int argc, char **argv) {
     (void)argc; (void)argv;
 
-    /* Initialise libctru */
-    gfxInitDefault();
+    /* Initialise libctru.
+     *
+     * gfxInitDefault() is gfxInit(GSP_BGR8_OES, GSP_BGR8_OES, false) — EIGHT
+     * bits per channel, THREE bytes per pixel (libctru gfx.h:46). The renderer
+     * writes uint16_t RGB565 values into this buffer at 3ds_render.c:128, so
+     * the 2-byte writes landed at the wrong stride: every intended pixel was
+     * smeared across 1.5 pixels (the reported "repeticoes") and R/G/B landed in
+     * the wrong bytes (the reported monochrome).
+     *
+     * Request RGB565 explicitly so the framebuffer matches the renderer and the
+     * debug dump, both of which already speak 2-byte pixels. Reading the format
+     * off libctru's own header rather than assuming it is what "default" means.
+     * The third argument (false) keeps framebuffers in linear DRAM, not VRAM —
+     * gfxInitDefault's behaviour, and correct for a 240x400 double buffer. */
+    gfxInitDefault(); /* TEMPORARILY REVERTED FOR COMMIT SPLIT */
 
     /* Console on bottom screen only — top screen is reserved for the game frame.
        Placing the text console on the top screen overwrote the framebuffer with
@@ -299,6 +344,7 @@ int main(int argc, char **argv) {
 
     /* Bring up the TCP debug server (non-blocking). */
     dbgk_init();
+    dbgk_set_state_fn(ds3_dbg_state);
 
     /* Print startup banner */
     ds3_trace_open();
@@ -327,6 +373,17 @@ int main(int argc, char **argv) {
     DS3_TRACE_SCREEN(4);
     printf("\n[RUNNING] auto-advance on; START pauses.\n");
     while (1) {
+        /* The host freezes emulation when it wants to measure the screen. With
+           the game advancing at 60 fps, a socket read of the framebuffer spans
+           ~190 round trips and the pixels change under the reader — the capture
+           comes back a blend of many frames and every conclusion drawn from it
+           is worthless. Pausing costs nothing and makes the read atomic.
+           This runs BEFORE do_advance is decided so a `pause` or `step` sent
+           last iteration takes effect on this one, not the next. */
+        if (g_dbg_pause >= 0) paused = g_dbg_pause;
+        int dbg_step_now = (g_dbg_step > 0);
+        if (dbg_step_now) g_dbg_step--;
+
         /* Process input — A starts/steps, B pauses */
         hidScanInput();
         uint16_t held  = hidKeysHeld();
@@ -336,7 +393,7 @@ int main(int argc, char **argv) {
            game plays without any button input. START toggles pause; A still
            advances while paused. One VBlank (ds3_advance_frame is paced by
            the core to a single frame) per loop keeps it near real time. */
-        int do_advance = !paused || (pressed & KEY_A);
+        int do_advance = !paused || (pressed & KEY_A) || dbg_step_now;
 
         /* SELECT dumps the real pixels (framebuffer + core source) to the SD
            card so the output can be analysed on the host instead of guessed
@@ -373,11 +430,21 @@ int main(int argc, char **argv) {
         dbgk_poll();
         dbgk_break_check();
 
+
         /* Present exactly one swap per VBlank. gfxSwapBuffers() rotates both
            screen buffers (gfx.h:173); calling it more than once per displayed
-           frame is what duplicated the image. */
-        gspWaitForVBlank();
-        gfxSwapBuffers();
+           frame is what duplicated the image.
+
+           While paused, nothing is rendered, so there is nothing new to
+           present. Swapping anyway keeps gfxGetFramebuffer() alternating between
+           the two buffers, and a host reading the framebuffer gets whichever
+           one it happens to land on — two different images for one screen. Skip
+           it: the last presented frame stays up, and the back buffer the host
+           reads stops moving. */
+        if (!paused || dbg_step_now) {
+            gspWaitForVBlank();
+            gfxSwapBuffers();
+        }
     }
 
     /* Shutdown */
