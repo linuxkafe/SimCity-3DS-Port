@@ -324,8 +324,13 @@ target_link_libraries(simcity-3ds PRIVATE
         ${DEVKITPRO}/devkitARM/arm-none-eabi/lib/armv6k/fpu/libm.a
     )
 
+    # NOTE: -specs=3dsx.specs is injected by the devkitPro toolchain itself
+    # (/opt/devkitpro/cmake/Platform/Nintendo3DS.cmake:16). Adding it again here
+    # made 3dsx.specs `%include <sync-dmb.specs>` twice, and gcc aborts with
+    # "attempt to rename spec 'link' to already defined spec 'sync_sync_link'".
+    # Do not re-add it. The remaining flags duplicate 3dsx.specs' own *link line
+    # and are kept only because they are harmless and were proven to link before.
     target_link_options(simcity-3ds PRIVATE
-        -specs=/opt/devkitpro/devkitARM/arm-none-eabi/lib/3dsx.specs
         -B/opt/devkitpro/devkitARM/arm-none-eabi/lib/armv6k/fpu/
         -mfloat-abi=hard
         -Wl,-d -Wl,--emit-relocs -Wl,--use-blx -Wl,--gc-sections -Wl,--no-warn-mismatch
@@ -344,8 +349,8 @@ target_link_libraries(simcity-3ds PRIVATE
     )
 
     # Link to a real ELF, then package a genuine 3DSX container in a POST_BUILD step.
-    # Linking straight to a ".3dsx" name produced a raw ELF that no 3DS loader
-    # (Luma/Azahar/FBI) accepts — see aes/peer-reviews/T012 finding F01.
+    # Linking straight to a ".3dsx" name produces a raw ELF that no 3DS loader
+    # (Luma/Azahar/FBI) accepts.
     set_target_properties(simcity-3ds PROPERTIES
         OUTPUT_NAME "simcity"
         SUFFIX ".elf"
@@ -369,7 +374,7 @@ target_link_libraries(simcity-3ds PRIVATE
     else()
         message(FATAL_ERROR
             "3dsxtool not found or simcity.smdh missing — refusing to emit a raw "
-            "ELF renamed .3dsx (unloadable). See aes/peer-reviews/T012 finding F01.")
+            "ELF renamed .3dsx (unloadable).")
     endif()
 
     # Headless test for 3DS disabled — C++ audio linking issues.

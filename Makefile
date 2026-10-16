@@ -1,10 +1,22 @@
-# SimCity DS/3DS Port — Build & Test Helpers
+# SimCity 3DS Port — Build & Test Helpers
 
 DOCKER_IMAGE ?= devkitpro/devkitarm
 WORK_DIR     ?= $(PWD)
-UPSTREAM     ?= /home/seyon/dev/Games/PC/scssr/SimCity-SNES-Static-Recomp
+# Upstream must be the repository root; the build mounts it and CMake appends
+# /static-recomp. The old .../PC/scssr/... path never existed on this machine.
+UPSTREAM     ?= /home/seyon/dev/Games/PC/SimCity-SNES-Static-Recomp
 ROM_PATH     ?= $(HOME)/SimCity(USA).sfc
-PLATFORM     ?= DS
+# DS was abandoned: the core is 2.6x over the ARM9 3.5 MB limit
+# (docs/3DS-PORT-STUDY.md). Default to the platform we actually build.
+PLATFORM     ?= 3DS
+
+# devkitPro ships the toolchain files under /opt/devkitpro/cmake, NOT under
+# $(DEVKITARM)/cmake/Platform. The old path does not exist in the image.
+ifeq ($(PLATFORM),3DS)
+  TOOLCHAIN ?= /opt/devkitpro/cmake/3DS.cmake
+else
+  TOOLCHAIN ?= /opt/devkitpro/cmake/NDS.cmake
+endif
 
 .PHONY: all docker-build docker-clean docker-run check doctor setup \
         ds-build ds-test-headless ds-rom-size \
@@ -15,22 +27,24 @@ all: docker-build
 # ── Build inside Docker ──────────────────────────────────────────────
 
 docker-build:
-	@echo "Building SimCityDS for $(PLATFORM) inside $(DOCKER_IMAGE)..."
+	@echo "Building SimCity$(PLATFORM) for $(PLATFORM) inside $(DOCKER_IMAGE)..."
+	@echo "  toolchain: $(TOOLCHAIN)"
 	docker run --rm \
 		-v "$(UPSTREAM):/upstream:ro" \
 		-v "$(WORK_DIR):/work" \
 		-w /work \
 		$(DOCKER_IMAGE) \
-		bash -c "\
-			export DEVKITARM=/opt/devkitpro/devkitARM && \
-			export PATH=\$DEVKITARM/bin:\$PATH && \
-			mkdir -p build && cd build && \
+		bash -c '\
+			set -e -o pipefail; \
+			export DEVKITARM=/opt/devkitpro/devkitARM; \
+			export PATH=$$DEVKITARM/bin:$$PATH; \
+			mkdir -p build; cd build; \
 			cmake .. \
-				-DCMAKE_TOOLCHAIN_FILE=\$$DEVKITARM/cmake/Platform/Nintendo$(if $(filter 3DS,$(PLATFORM)),3DS,DS).cmake \
+				-DCMAKE_TOOLCHAIN_FILE=$(TOOLCHAIN) \
 				-DCMAKE_BUILD_TYPE=Release \
 				-DUPSTREAM_SRC_DIR=/upstream/static-recomp \
-				-DPLATFORM=$(PLATFORM) && \
-			make -j\$(nproc) 2>&1 | tail -100"
+				-DPLATFORM=$(PLATFORM); \
+			make -j$$(nproc) 2>&1 | tail -100'
 
 # ── Quick native build (requires devkitARM installed) ───────────────
 ds-build:
@@ -61,10 +75,11 @@ ds-test-headless:
 		-v "$(ROM_PATH):/rom:ro" \
 		-w /work/build \
 		$(DOCKER_IMAGE) \
-		bash -c " \
-			export DEVKITARM=/opt/devkitpro/devkitARM && \
-			export PATH=\$DEVKITARM/bin:\$PATH && \
-			./simcity-headless-test /rom 300"
+		bash -c '\
+			set -e -o pipefail; \
+			export DEVKITARM=/opt/devkitpro/devkitARM; \
+			export PATH=$$DEVKITARM/bin:$$PATH; \
+			./simcity-headless-test /rom 300' 
 
 3ds-test-headless:
 	@echo "Running 3DS headless test inside $(DOCKER_IMAGE)..."
@@ -74,10 +89,11 @@ ds-test-headless:
 		-v "$(ROM_PATH):/rom:ro" \
 		-w /work/build \
 		$(DOCKER_IMAGE) \
-		bash -c " \
-			export DEVKITARM=/opt/devkitpro/devkitARM && \
-			export PATH=\$DEVKITARM/bin:\$PATH && \
-			./simcity-headless-test /rom 300"
+		bash -c '\
+			set -e -o pipefail; \
+			export DEVKITARM=/opt/devkitpro/devkitARM; \
+			export PATH=$$DEVKITARM/bin:$$PATH; \
+			./simcity-headless-test /rom 300' 
 
 # ── Check ROM size of output .nds / .3dsx ────────────────────────────
 
@@ -137,5 +153,5 @@ setup:
 	@docker pull $(DOCKER_IMAGE) 2>&1 | tail -3
 	@echo ""
 	@echo "Place SimCity(USA).sfc at: $(ROM_PATH)"
-	@echo "Then run: make docker-build PLATFORM=DS"
-	@echo "       or: make docker-build PLATFORM=3DS"
+	@echo "Then run: make docker-build            # 3DS (default)"
+	@echo "     or: make docker-build PLATFORM=DS # DS (blocked: over memory budget)"

@@ -11,6 +11,16 @@ simcity.3dsx
 .simcity-3ds-build*
 .aes/
 aes/
+# AES enforcement scripts (local-only infrastructure)
+scripts/verify-implementation.sh
+# Python bytecode
+__pycache__/
+*.pyc
+# Device captures from the debug port. Regenerate with tools/netfb.py; the
+# canonical evidence set lives under aes/verification/, which is local-only.
+# Keeping multi-MB raw framebuffers out of history is the same rule T020 is
+# about for the artifacts already tracked.
+debug/net/
 # ROM files
 *.sfc
 *.smc
