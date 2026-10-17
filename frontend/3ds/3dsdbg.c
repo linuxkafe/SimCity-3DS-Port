@@ -30,6 +30,8 @@
 
 #include "3dsdbg.h"
 
+#include "simcity_static_recomp.h"
+
 #include <3ds.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -452,10 +454,17 @@ static void dbgk_ext(const char *line) {
     if (!strcmp(verb, "ping")) {
         dbgk_send_str("OK pong\n");
     } else if (!strcmp(verb, "info")) {
+        /* cclog is reported here because every measurement has to be
+           attributable: a `core` number means nothing without knowing whether
+           the per-frame SHA-256 was running during it.
+           Not in the public header -- declared here rather than widening the
+           core's API for a diagnostic that only the harness needs. */
+        extern int sc_core_logging_enabled(void);
         char m[224];
         snprintf(m, sizeof(m),
-                 "OK 3dsdbgkit/2 build=%s breaks=%d ftp_listen=%d ftp_errno=%d\n",
-                 DS3_BUILD_ID, g_break_count, g_ftp_listen_fd, g_ftp_last_error);
+                 "OK 3dsdbgkit/2 build=%s breaks=%d ftp_listen=%d ftp_errno=%d cclog=%d\n",
+                 DS3_BUILD_ID, g_break_count, g_ftp_listen_fd, g_ftp_last_error,
+                 sc_core_logging_enabled() ? 1 : 0);
         dbgk_send_str(m);
     } else if (!strcmp(verb, "state")) {
         if (!g_state_fn) { dbgk_send_str("ERR nostate\n"); return; }
@@ -471,6 +480,31 @@ static void dbgk_ext(const char *line) {
         char m[32];
         snprintf(m, sizeof(m), "OK rot=%d\n", mode);
         dbgk_send_str(m);
+    } else if (!strcmp(verb, "cclog")) {
+        /* Toggles the CORE's log handle, not the frontend trace.
+           This is not a convenience verb. sc_core_logging_enabled() is just
+           `g_core_log != NULL`, and render_lines_impl gates TWO SHA-256
+           passes per frame behind it -- 122368 bytes of out555 plus 244736
+           bytes of out32, 367 KB hashed every frame to fill two fields in
+           the video report that this frontend never reads. 61184 pixels go
+           through a diagnostic that exists to certify the PC build.
+
+           If closing the log moves `core`, that is the cost, measured, rather
+           than argued. If it does not move, the SHA hypothesis is dead and the
+           time is somewhere else. One build, both states, same session, same
+           ROM -- which is what makes it comparable. */
+        int on = 1;
+        if (sscanf(line, "%*s %d", &on) != 1) { dbgk_send_str("ERR args\n"); return; }
+        if (on) {
+            char lerr[128];
+            if (simcity_recomp_log_open("sdmc:/simcity-3ds.log", lerr, sizeof(lerr)) != 1)
+                dbgk_send_str("ERR log_open failed\n");
+            else
+                dbgk_send_str("OK cclog=1 sha256=per-frame\n");
+        } else {
+            simcity_recomp_log_close();
+            dbgk_send_str("OK cclog=0 sha256=skipped\n");
+        }
     } else if (!strcmp(verb, "mode")) {
         int m = 0;
         if (sscanf(line, "%*s %d", &m) != 1) { dbgk_send_str("ERR args\n"); return; }
