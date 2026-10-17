@@ -408,12 +408,17 @@ volatile int      g_dbg_input_frames = 0; /* >0: release after N advances */
 
 volatile int g_dbg_chan_swap = 0;
 volatile int g_dbg_quit = 0;
+volatile int g_dbg_trace_perframe = 0;
 
 volatile uint32_t g_dbg_phase_us[DBGK_PHASE_COUNT];
 volatile uint32_t g_dbg_phase_avg[DBGK_PHASE_COUNT];
 
 volatile int g_put_remaining = 0;
 FILE *g_put_file = NULL;
+static unsigned char g_put_buf[4096];
+static size_t g_put_used = 0;
+static char g_put_tmp[128];
+static char g_put_final[128];
 
 /* Resolve a screen to its current framebuffer. Never cached: libctru may hand
    back a different pointer after gfxSwapBuffers() (gfx.h:140), so a cached
@@ -457,6 +462,21 @@ static void dbgk_ext(const char *line) {
         char m[32];
         snprintf(m, sizeof(m), "OK rot=%d\n", mode);
         dbgk_send_str(m);
+    } else if (!strcmp(verb, "trace")) {
+        int on = 0;
+        if (sscanf(line, "%*s %d", &on) != 1) { dbgk_send_str("ERR args\n"); return; }
+        g_dbg_trace_perframe = on ? 1 : 0;
+        char m[48];
+        snprintf(m, sizeof(m), "OK trace=%d\n", g_dbg_trace_perframe);
+        dbgk_send_str(m);
+    } else if (!strcmp(verb, "abort")) {
+        /* Cancel an in-flight put and leave the destination alone. */
+        if (g_put_file) {
+            fclose(g_put_file); g_put_file = NULL;
+            remove(g_put_tmp);
+        }
+        g_put_remaining = 0; g_put_used = 0;
+        dbgk_send_str("OK aborted\n");
     } else if (!strcmp(verb, "quit")) {
         g_dbg_quit = 1;
         dbgk_send_str("OK quitting\n");
@@ -474,12 +494,16 @@ static void dbgk_ext(const char *line) {
         int n = snprintf(m, sizeof(m),
             "OK now[adv=%uus audio=%uus dbg=%uus present=%uus loop=%uus] "
             "avg[adv=%uus audio=%uus dbg=%uus present=%uus loop=%uus]",
-            g_dbg_phase_us[DBGK_PHASE_ADVANCE], g_dbg_phase_us[DBGK_PHASE_AUDIO],
-            g_dbg_phase_us[DBGK_PHASE_DEBUG], g_dbg_phase_us[DBGK_PHASE_PRESENT],
-            g_dbg_phase_us[DBGK_PHASE_LOOP],
-            g_dbg_phase_avg[DBGK_PHASE_ADVANCE], g_dbg_phase_avg[DBGK_PHASE_AUDIO],
-            g_dbg_phase_avg[DBGK_PHASE_DEBUG], g_dbg_phase_avg[DBGK_PHASE_PRESENT],
-            g_dbg_phase_avg[DBGK_PHASE_LOOP]);
+            (unsigned)g_dbg_phase_us[DBGK_PHASE_ADVANCE],
+            (unsigned)g_dbg_phase_us[DBGK_PHASE_AUDIO],
+            (unsigned)g_dbg_phase_us[DBGK_PHASE_DEBUG],
+            (unsigned)g_dbg_phase_us[DBGK_PHASE_PRESENT],
+            (unsigned)g_dbg_phase_us[DBGK_PHASE_LOOP],
+            (unsigned)g_dbg_phase_avg[DBGK_PHASE_ADVANCE],
+            (unsigned)g_dbg_phase_avg[DBGK_PHASE_AUDIO],
+            (unsigned)g_dbg_phase_avg[DBGK_PHASE_DEBUG],
+            (unsigned)g_dbg_phase_avg[DBGK_PHASE_PRESENT],
+            (unsigned)g_dbg_phase_avg[DBGK_PHASE_LOOP]);
         dbgk_send_bytes(m, (size_t)n);
         dbgk_send_str("\n");
     } else if (!strcmp(verb, "put")) {
@@ -498,8 +522,11 @@ static void dbgk_ext(const char *line) {
                code or a save. */
             dbgk_send_str("ERR path must start with sdmc:/\n"); return;
         }
-        g_put_file = fopen(path, "wb");
+        snprintf(g_put_tmp, sizeof(g_put_tmp), "%s.part", path);
+        snprintf(g_put_final, sizeof(g_put_final), "%s", path);
+        g_put_file = fopen(g_put_tmp, "wb");
         if (!g_put_file) { dbgk_send_str("ERR open failed\n"); return; }
+        g_put_used  = 0;
         g_put_remaining = (int)size;
         dbgk_send_str("OK sending\n");
     } else if (!strcmp(verb, "input")) {
@@ -636,13 +663,27 @@ static void dbgk_feed(const char *data, size_t len) {
          * The check has to come first or the payload gets chewed up as
          * extension lines. */
         if (g_put_remaining > 0) {
-            fwrite(&c, 1, 1, g_put_file);
+            /* Block-buffered. The first version wrote one byte per fwrite,
+               which is 13 million calls for a 13 MB image and is what made the
+               transfer fragile enough to drop the app. */
+            g_put_buf[g_put_used++] = (unsigned char)c;
             g_put_remaining--;
+            if (g_put_used == sizeof(g_put_buf) || g_put_remaining == 0) {
+                fwrite(g_put_buf, 1, g_put_used, g_put_file);
+                g_put_used = 0;
+            }
             if (g_put_remaining == 0) {
+                /* Only now is the destination touched. An interrupted transfer
+                   leaves a .part file behind and the previous working build
+                   intact, instead of destroying the only copy. */
                 fflush(g_put_file);
                 fclose(g_put_file);
                 g_put_file = NULL;
-                dbgk_send_str("OK written\n");
+                if (rename(g_put_tmp, g_put_final) == 0) {
+                    dbgk_send_str("OK written\n");
+                } else {
+                    dbgk_send_str("ERR rename failed, .part left behind\n");
+                }
             }
             continue;
         }
@@ -786,12 +827,15 @@ void dbgk_poll(void) {
 
     char tmp[512];
     ssize_t n = recv(g_client_fd, tmp, sizeof(tmp), 0);
-    if (n == 0) {
+    /* Close on ANY non-positive recv, not just a clean FIN. Returning early on
+       -1 kept a dead peer in g_client_fd forever; the bridge accepts one client
+       at a time, so one host that vanished without closing made the port look
+       dead to every later connection, including the operator's. */
+    if (n <= 0) {
         close(g_client_fd);
         g_client_fd = -1;
         return;
     }
-    if (n <= 0) return;
     dbgk_feed(tmp, (size_t)n);
 }
 

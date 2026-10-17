@@ -108,6 +108,11 @@ void dbgk_exit(void);
    to do between every test. */
 extern volatile int g_dbg_quit;
 
+/* Set by the `trace` verb. Off by default: the per-frame markers cost more
+   than everything else in the loop put together. On when a crash needs
+   localising, because the log survives an abort that would eat buffered writes. */
+extern volatile int g_dbg_trace_perframe;
+
 /* Service the server: accept a client, read commands, reply. Non-blocking;
    call once per iteration of the host application's main loop. */
 void dbgk_poll(void);

@@ -42,6 +42,15 @@
 
 static FILE *g_trace = NULL;
 
+/* Per-frame tracing is OFF by default. Each ds3_trace() call does an
+   fprintf + fflush to a file on the SD card, and two of them run every single
+   emulated frame. Profiling put that at 81.8 million ticks — by far the
+   largest single cost in the loop — for a diagnostic added to localise the T012
+   data abort, which was fixed in 384592a. The comment at the trace block still
+   says "remove once the data abort is fixed".
+   The `trace` verb turns it back on when a crash actually needs localising. */
+#define g_trace_perframe g_dbg_trace_perframe
+
 static void ds3_trace_open(void) {
     g_trace = fopen(TRACE_PATH, "w");
     if (g_trace) {
@@ -241,10 +250,12 @@ SimCityRecompFrameResult ds3_advance_frame(void) {
         if (g_dbg_input_frames == 0) g_dbg_input = 0;
     }
 
-    ds3_trace("[T5] advance_frame: entering simcity_recomp_advance");
+    if (g_trace_perframe)
+        ds3_trace("[T5] advance_frame: entering simcity_recomp_advance");
     /* Advance one SNES frame */
     int rc = simcity_recomp_advance(g_recomp, input, 1u, &result);
-    ds3_trace("[T5] simcity_recomp_advance returned rc=%d", rc);
+    if (g_trace_perframe)
+        ds3_trace("[T5] simcity_recomp_advance returned rc=%d", rc);
     if (rc != 1) {
         snprintf(result.renderer_error, sizeof(result.renderer_error),
                  "Advance failed (error=%d). %s", rc,
@@ -327,9 +338,11 @@ static void ds3_dbg_state(char *buf, unsigned capacity) {
              frame, src, fw, fh, instr, master,
              (unsigned)g_last_input, (unsigned)g_dbg_input,
              g_dbg_chan_swap, g_dbg_rotate_mode,
-             g_dbg_phase_us[DBGK_PHASE_ADVANCE], g_dbg_phase_us[DBGK_PHASE_AUDIO],
-             g_dbg_phase_us[DBGK_PHASE_DEBUG], g_dbg_phase_us[DBGK_PHASE_PRESENT],
-             g_dbg_phase_us[DBGK_PHASE_LOOP], err);
+             (unsigned)g_dbg_phase_us[DBGK_PHASE_ADVANCE],
+             (unsigned)g_dbg_phase_us[DBGK_PHASE_AUDIO],
+             (unsigned)g_dbg_phase_us[DBGK_PHASE_DEBUG],
+             (unsigned)g_dbg_phase_us[DBGK_PHASE_PRESENT],
+             (unsigned)g_dbg_phase_us[DBGK_PHASE_LOOP], err);
 }
 
 int main(int argc, char **argv) {
