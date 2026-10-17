@@ -1,0 +1,59 @@
+Subject: [PATCH] core: widen 5-bit colour to 8 bits by table, not by divide
+
+bgra() converts a SNES BGR555 colour to the 32-bit "BGRA" buffer the public
+API exposes. It does three 32-bit multiplies and three integer divides per
+pixel, over 256x239 = 61184 pixels, every frame:
+
+    uint32_t blue  = (color & 31u)         * 255u / 31u;
+    uint32_t green = ((color >> 5) & 31u)  * 255u / 31u;
+    uint32_t red   = ((color >> 10) & 31u) * 255u / 31u;
+
+The 3DS ARM11 has no fast integer divide. Profiling the running port put the
+frame-conversion call at roughly half of simcity_recomp_advance(), and
+advance() at 91% of the main loop, while the core reported only ~12 281 guest
+instructions per frame, which cannot account for it. The cost is host-side work
+the instruction counter does not cover.
+
+The obvious replacement, (v<<3)|(v>>2), is WRONG. That is the 5->5->8 widening
+and it is not (v*255)/31: it diverges on 15 of the 32 inputs (v=4 -> 33 vs 32,
+v=16 -> 132 vs 131, v=30 -> 247 vs 246). Applying it would shift 15 tones of
+every palette. It was caught by testing all 32 values before sending anything.
+
+What is exact is a 32-entry lookup indexed by the 5-bit channel: a byte load
+per channel, no multiply, no divide, and bit-identical output. Verified for
+all 32768 BGR555 words end to end, old versus new.
+
+This changes no output value. If it does not move the frame rate, the divides
+are not the wall, and the remaining cost is elsewhere - in which case do not
+proceed with the RGB565 plan on the strength of this change.
+
+--- a/src/sc_v28_video.c	2026-10-17 12:48:24.887615763 +0100
++++ b/src/sc_v28_video.c	2026-10-17 12:48:24.948616298 +0100
+@@ -110,12 +110,24 @@
+            ((uint16_t)g_cgram[address + 1u] << 8)) & 0x7fffu;
+ }
+ 
++/* Widen a 5-bit channel to 8 bits, exactly reproducing (v*255)/31 without the
++ * multiply and the divide. One byte load per channel.
++ *
++ * NOT (v<<3)|(v>>2): that is the 5->5->8 widening and differs from the divide
++ * on 15 of 32 inputs (v=4 -> 33 vs 32, v=16 -> 132 vs 131). Verified equal to
++ * (v*255)/31 for all v in 0..31, and for all 32768 BGR555 words end to end. */
++static const uint8_t widen5[32] = {
++     0,   8,  16,  24,  32,  41,  49,  57,  65,  74,  82,  90,  98, 106,
++   115, 123, 131, 139, 148, 156, 164, 172, 180, 189, 197, 205, 213, 222,
++   230, 238, 246, 255
++};
++
+ static uint32_t bgra(uint16_t color) {
+     /* SNES CGRAM stores colors in BGR555 format:
+      * bits 0-4 = Blue, bits 5-9 = Green, bits 10-14 = Red */
+-    uint32_t blue = (color & 31u) * 255u / 31u;
+-    uint32_t green = ((color >> 5) & 31u) * 255u / 31u;
+-    uint32_t red = ((color >> 10) & 31u) * 255u / 31u;
++    uint32_t blue = widen5[color & 31u];
++    uint32_t green = widen5[(color >> 5) & 31u];
++    uint32_t red = widen5[(color >> 10) & 31u];
+     return 0xFF000000u | (blue) | (green << 8) | (red << 16);
+ }
+ 
