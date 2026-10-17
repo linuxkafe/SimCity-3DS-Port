@@ -304,6 +304,7 @@ else()
         frontend/3ds/3ds_render.c
         frontend/3ds/3ds_audio.c
         frontend/3ds/3dsdbg.c
+        frontend/3ds/ds3ftp.c
     )
 
     target_include_directories(simcity-3ds PRIVATE

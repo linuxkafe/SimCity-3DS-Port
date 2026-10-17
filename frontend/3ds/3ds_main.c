@@ -15,6 +15,7 @@
 #include "3ds_render.h"
 #include "3dsdbg.h"
 #include "3ds_audio.h"
+#include "ds3ftp.h"
 
 #include <3ds.h>
 #include <string.h>
@@ -378,6 +379,7 @@ int main(int argc, char **argv) {
     /* Bring up the TCP debug server (non-blocking). */
     dbgk_init();
     dbgk_set_state_fn(ds3_dbg_state);
+    ds3ftp_init();
 
     /* Print startup banner */
     ds3_trace_open();
@@ -485,6 +487,7 @@ int main(int argc, char **argv) {
            host flip rotation and pull live pixels without button presses. */
         dbgk_poll();
         dbgk_break_check();
+        ds3ftp_poll();
 
         g_dbg_phase_us[DBGK_PHASE_DEBUG] =
             (uint32_t)(svcGetSystemTick() - t_loop);
@@ -527,6 +530,7 @@ int main(int argc, char **argv) {
     printf("\nShutting down...\n");
     ds3_render_exit();
     ds3_audio_exit();
+    ds3ftp_exit();
     dbgk_exit();
     ds3_shutdown();
     gfxExit();
