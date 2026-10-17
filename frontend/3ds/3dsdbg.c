@@ -671,6 +671,34 @@ static void dbgk_ext(const char *line) {
 static char   g_ext_line[128];
 static size_t g_ext_used = 0;
 
+/* Move <path>.part over <path>. rename() is not implemented for sdmc: paths in
+   the 3DS newlib — it returns -1/ENOSYS even with both files present in the
+   same directory — so fall back to copying, which is what rename would have
+   done. The destination is only opened once the source is complete, so an
+   interrupted transfer still cannot destroy the working build. */
+static int dbgk_put_publish(void) {
+    if (rename(g_put_tmp, g_put_final) == 0) return 0;
+
+    FILE *in  = fopen(g_put_tmp, "rb");
+    FILE *out = NULL;
+    if (!in) return -1;
+
+    out = fopen(g_put_final, "wb");
+    if (!out) { fclose(in); return -1; }
+
+    static unsigned char buf[4096];
+    size_t n;
+    int rc = 0;
+    while ((n = fread(buf, 1, sizeof(buf), in)) > 0) {
+        if (fwrite(buf, 1, n, out) != n) { rc = -1; break; }
+    }
+    fflush(out);
+    fclose(out);
+    fclose(in);
+    remove(g_put_tmp);
+    return rc;
+}
+
 static void dbgk_feed_ext_byte(char c) {
     if (c == '\n' || c == '\r') {
         if (g_ext_used) {
@@ -708,10 +736,10 @@ static void dbgk_feed(const char *data, size_t len) {
                 fflush(g_put_file);
                 fclose(g_put_file);
                 g_put_file = NULL;
-                if (rename(g_put_tmp, g_put_final) == 0) {
+                if (dbgk_put_publish() == 0) {
                     dbgk_send_str("OK written\n");
                 } else {
-                    dbgk_send_str("ERR rename failed, .part left behind\n");
+                    dbgk_send_str("ERR publish failed, .part left behind\n");
                 }
             }
             continue;

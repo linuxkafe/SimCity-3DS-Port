@@ -57,8 +57,8 @@ static char  g_cwd[768] = "sdmc:/";
 static char  g_line[FTP_LINE_MAX];
 static size_t g_line_len = 0;
 static char  g_rbuf[FTP_XFER_CHUNK];
-static int   g_pasv_port = 0;
-static int   g_data_fd = -1;
+static int   g_pasv_fd = -1;   /* passive-mode listening socket */
+static int   g_data_fd = -1;     /* accepted data connection */
 
 static void ftp_out(const char *s, size_t n) {
     if (n > FTP_OUT_MAX - g_out_len) {
@@ -157,64 +157,69 @@ static void ftp_list(int fd) {
 
 /* ── Commands ──────────────────────────────────────────────────────── */
 
+/* In a passive transfer the SERVER listens on the data port and the CLIENT
+   connects to it. The previous version created a listening socket here and then
+   threw it away, and later "connected" a fresh socket to it as though the server
+   were the client. curl received 227, dialled the advertised port, and the data
+   never arrived because nothing ever accepted the inbound connection.
+
+   So: keep the listening socket, and accept on it (in ds3ftp_poll), not
+   connect to it. */
 static void ftp_open_passive(int fd) {
-    struct sockaddr_in addr;
-    socklen_t len = sizeof(addr);
+    struct sockaddr_in self;
+    socklen_t slen = sizeof(self);
     int pfd;
     char reply[128];
 
-    if (getsockname(fd, (struct sockaddr *)&addr, &len) != 0) {
+    if (g_pasv_fd >= 0) { close(g_pasv_fd); g_pasv_fd = -1; }
+
+    if (getsockname(fd, (struct sockaddr *)&self, &slen) != 0) {
         ftp_reply(fd, "425 cannot determine port\r\n");
         return;
     }
     pfd = socket(AF_INET, SOCK_STREAM, IPPROTO_IP);
     if (pfd < 0) { ftp_reply(fd, "425 cannot open data socket\r\n"); return; }
 
-    setsockopt(pfd, SOL_SOCKET, SO_REUSEADDR, &(int){1}, sizeof(int));
-
+    /* soc:u will not bind port 0, so use a fixed port above the control port.
+       The server is single-client by contract, so a fixed port costs nothing. */
     struct sockaddr_in pa;
     memset(&pa, 0, sizeof(pa));
     pa.sin_family = AF_INET;
-    pa.sin_addr = addr.sin_addr;
-    /* soc:u will not bind port 0 - asking for an ephemeral port fails with
-       "cannot bind data socket", which is exactly what it did. Use a fixed
-       data port just above the control port instead. One client at a time is
-       already the contract, so a fixed port costs nothing. */
+    pa.sin_addr.s_addr = htonl(INADDR_ANY);
     pa.sin_port = htons((uint16_t)(FTP_PORT + 1));
     if (bind(pfd, (struct sockaddr *)&pa, sizeof(pa)) != 0 || listen(pfd, 1) != 0) {
         close(pfd);
         ftp_reply(fd, "425 cannot bind data socket\r\n");
         return;
     }
-    len = sizeof(pa);
-    if (getsockname(pfd, (struct sockaddr *)&pa, &len) != 0) {
-        close(pfd);
-        ftp_reply(fd, "425 cannot determine data port\r\n");
-        return;
-    }
-    g_pasv_port = ntohs(pa.sin_port);
-    snprintf(reply, sizeof(reply), "227 entering passive mode (127,0,0,1,%d,%d)\r\n",
-             (g_pasv_port >> 8) & 0xFF, g_pasv_port & 0xFF);
+    fcntl(pfd, F_SETFL, fcntl(pfd, F_GETFL, 0) | O_NONBLOCK);
+
+    /* Advertise the address the client can actually reach us on — the address
+       of the control connection, not 127.0.0.1. Telling a remote client to
+       dial loopback is why the very first PASV attempt produced a connection to
+       the wrong place entirely. */
+    snprintf(reply, sizeof(reply), "227 entering passive mode (%d,%d,%d,%d,%d,%d)\r\n",
+             (unsigned)((self.sin_addr.s_addr >> 24) & 0xFF),
+             (unsigned)((self.sin_addr.s_addr >> 16) & 0xFF),
+             (unsigned)((self.sin_addr.s_addr >> 8) & 0xFF),
+             (unsigned)(self.sin_addr.s_addr & 0xFF),
+             (unsigned)((FTP_PORT + 1) >> 8),
+             (unsigned)((FTP_PORT + 1) & 0xFF));
+    g_pasv_fd = pfd;
     ftp_reply(fd, reply);
 }
 
-static int ftp_connect_data(void) {
-    struct sockaddr_in pa;
-    int dfd;
-
-    if (g_pasv_port == 0) return -1;
-    dfd = socket(AF_INET, SOCK_STREAM, IPPROTO_IP);
-    if (dfd < 0) return -1;
-    memset(&pa, 0, sizeof(pa));
-    pa.sin_family = AF_INET;
-    pa.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
-    pa.sin_port = htons((uint16_t)g_pasv_port);
-    if (connect(dfd, (struct sockaddr *)&pa, sizeof(pa)) != 0) {
-        close(dfd);
-        return -1;
-    }
-    g_pasv_port = 0;
-    return dfd;
+/* Accept the client's inbound data connection, non-blocking: returns -1 while
+   the client has not dialled yet, which is normal and must not be fatal. */
+static int ftp_accept_data(void) {
+    int c;
+    if (g_pasv_fd < 0) return -1;
+    c = accept(g_pasv_fd, NULL, NULL);
+    if (c < 0) return -1;
+    fcntl(c, F_SETFL, fcntl(c, F_GETFL, 0) | O_NONBLOCK);
+    close(g_pasv_fd);
+    g_pasv_fd = -1;
+    return c;
 }
 
 static void ftp_exec(int fd, char *cmd, char *arg) {
@@ -356,7 +361,9 @@ void ds3ftp_init(void) {
 void ds3ftp_exit(void) {
     if (g_xfer_file) { fclose(g_xfer_file); g_xfer_file = NULL; }
     if (g_client >= 0) { close(g_client); g_client = -1; }
-    if (g_listen >= 0) { close(g_listen); g_listen = -1; }
+    if (g_pasv_fd  >= 0) { close(g_pasv_fd);  g_pasv_fd  = -1; }
+    if (g_data_fd  >= 0) { close(g_data_fd);  g_data_fd  = -1; }
+    if (g_listen    >= 0) { close(g_listen);    g_listen    = -1; }
     g_ftp_listen_fd = -1;
 }
 
@@ -370,6 +377,7 @@ void ds3ftp_poll(void) {
             g_client = c;
             g_line_len = 0;
             g_out_len = 0;
+            if (g_pasv_fd >= 0) { close(g_pasv_fd); g_pasv_fd = -1; }
             ftp_reply(c, "220 SimCity 3DS FTP (sd card)\r\n");
             ftp_flush();
         }
@@ -380,7 +388,7 @@ void ds3ftp_poll(void) {
     /* A transfer in flight gets the whole poll, so the game still runs between
        chunks instead of the file blocking everything. */
     if (g_xfer_file) {
-        if (g_data_fd < 0) g_data_fd = ftp_connect_data();
+        if (g_data_fd < 0) g_data_fd = ftp_accept_data();
         int data_fd = g_data_fd;
         if (data_fd < 0) return;
 
