@@ -1,9 +1,20 @@
 # 3dsdbgkit — 3DS Homebrew Debug Bridge
 
-> **⚠️ STATE: UNPLAYABLE / EXPERIMENTAL**
+> **⚠️ STATE: EXPERIMENTAL — runs, but not playable, and not yet autonomous**
 >
-> This project is a work-in-progress debug toolkit for Nintendo 3DS homebrew development.
-> It is **not playable**, not stable, and not ready for end users.
+> The game boots, renders correctly on hardware, and runs at a measured cost per
+> frame. It is **not playable at speed** and there is **no automated test
+> coverage** — every performance number so far was taken by hand against a
+> device, which is the main thing now being fixed.
+
+> **🚨 KNOWN PROBLEM: two copyrighted ROM dumps are in this repository's history.**
+> `investigation/quarantine-armv7/simcity.cia` (13.1 MB) and `simcity_full.cia`
+> (13.6 MB) were committed in `6d1774a` and are reachable from `origin/master`.
+> They are now untracked, but untracking does not remove them from history, and
+> the remote is public. They were pulled from history on 2026-10-17 — see
+> `aes/tickets/T030-rom-exposure.md` in the local AES tree for the record and
+> the options weighed. **Do not clone or redistribute this repository until that
+> is resolved.**
 
 ---
 
@@ -57,6 +68,51 @@ info           → OK 3dsdbgkit/1 pid=ok breaks=0
 brk 0x00102000 → OK break set
 dumpmem 0x00100000 256 → OK dumping + binary blob
 ```
+
+---
+
+## Current state, measured
+
+Performance work so far, all measured on hardware. `core` is
+`simcity_recomp_advance()` in ARM11 ticks per frame.
+
+| Change | Effect | Evidence |
+|---|---|---|
+| `bgra()` integer divides → exact 32-entry table | shipped; the reported −23.7% is **retracted**, see below | `tools/check_rgb565_exact.c`, 0 divergences over all 32768 inputs |
+| Core log off by default (removes 2× per-frame SHA-256) | **−14.5%**, active by default | reproduced over 12 interleaved pairs, +21.8M ticks |
+| Read frame as BGR555 instead of re-widening BGRA | **no measurable gain** | −1.1%, inside measurement noise |
+
+Three things worth knowing before trusting any number here:
+
+1. **`core` is not a stable clock.** It varies by up to **42%** with scene
+   content. Measuring change A and then change B minutes apart measures the
+   drift, not the change. Every real result here uses interleaved pairs with
+   the difference taken *within* each pair, and discards contaminated pairs
+   rather than averaging them in.
+2. **An earlier −23.7% figure was retracted.** Drift alone moves 50M ticks
+   against a reported 46M effect. The change stays (it is provably
+   output-identical and removes 183 584 divides); the *number* was not sound.
+3. **Nothing has been verified for output equality on hardware.** The colour
+   conversion is proven exhaustively on the host. A device-side equivalence test
+   needs a same-frame capture from both builds and has not been done.
+
+Still unattributed: the large majority of per-frame ticks, spread across the
+static route loop, `smp_sync_to_master` (the DSP) and the composite pass.
+
+### Patches, not edits
+
+The upstream core is never edited in place. `patches/` holds a chain applied on
+every build, so a build is reproducible from a clean checkout:
+
+| Patch | Purpose |
+|---|---|
+| `0001-cold-reset-sram-on-heap.patch` | ARM11 portability for the cold reset |
+| `0002-core-bgra-without-divides.patch` | replaces per-pixel divides with an exact table |
+| `0003-core-expose-bgr555.patch` | exposes the composited frame the core already builds |
+| `0004-core-switchable-analyze.patch` | makes `analyze()` measurable |
+
+The generated dispatch shards (v11/v34/v35/v36) are ROM-certified and remain
+byte-identical to upstream.
 
 ---
 
