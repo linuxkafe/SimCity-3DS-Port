@@ -119,7 +119,7 @@ extern volatile int g_dbg_trace_perframe;
 
 /* build identity, so the host can confirm what is actually running on the
    device instead of assuming the card holds what was last uploaded */
-#define DS3_BUILD_ID "ftp6"
+#define DS3_BUILD_ID "ftp7"
 
 /* Set by the `mode` verb.
    0 = simcity_recomp_advance()          — conversion and render every frame

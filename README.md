@@ -1,108 +1,104 @@
-# 3dsdbgkit — 3DS Homebrew Debug Bridge
+# SimCity for Nintendo 3DS
 
-> **⚠️ STATE: EXPERIMENTAL — runs, but not playable, and not yet autonomous**
+A port of **SimCity** (1991, Maxis / Will Wright) from the Super Nintendo to
+Nintendo 3DS homebrew, built on a static recompilation of the original game
+rather than an emulator or an interpreter.
+
+> **⚠️ Status: runs, but is not playable, and is not yet fast.**
 >
-> The game boots, renders correctly on hardware, and runs at a measured cost per
-> frame. It is **not playable at speed** and there is **no automated test
-> coverage** — every performance number so far was taken by hand against a
-> device, which is the main thing now being fixed.
-
-> **🚨 KNOWN PROBLEM: two copyrighted ROM dumps are in this repository's history.**
-> `investigation/quarantine-armv7/simcity.cia` (13.1 MB) and `simcity_full.cia`
-> (13.6 MB) were committed in `6d1774a` and are reachable from `origin/master`.
-> They are now untracked, but untracking does not remove them from history, and
-> the remote is public. They were pulled from history on 2026-10-17 — see
-> `aes/tickets/T030-rom-exposure.md` in the local AES tree for the record and
-> the options weighed. **Do not clone or redistribute this repository until that
-> is resolved.**
+> The game boots, renders correctly on hardware and in an emulator, and accepts
+> input. It does not run at a playable frame rate yet. No audio. There is no
+> test coverage except what is described below.
+>
+> **No ROM is included and none will ever be.** See [Legal](#legal).
 
 ---
 
-## What is 3dsdbgkit?
+## What game this is
 
-**3dsdbgkit** is a reusable debug bridge for **libctru-based 3DS homebrew** that runs on the console itself. It provides two debugging interfaces over a single TCP port (default 5002):
+**SimCity**, the 1991 city-building game that founded the genre, as released on
+the Super Nintendo in 1991. Not SimCity 2000, not the SNES re-release — the
+original. The target is specifically the **USA** release, which is the ROM the
+upstream static recompilation was built against.
 
-| Interface | Purpose |
-|-----------|---------|
-| **GDB RSP Stub** | Full GDB Remote Serial Protocol support — breakpoints, memory read/write, register inspection, single-step, continue. Attach with `target remote <3ds-ip>:5002` in `arm-none-eabi-gdb`. |
-| **Extension Protocol** | Line-oriented ASCII commands for app-specific introspection (framebuffer dump, structured memory dump, custom queries). Coexists with RSP on the same socket. |
+You build the city by zoning residential, commercial and industrial land,
+watching it grow, and dealing with the consequences: traffic, pollution,
+taxes, fires, and your own zoning mistakes. It is a construction toy with a
+systems simulation underneath, and it is still the sharpest example of that
+design.
 
-**Key properties:**
-- **Zero SimCity dependency** — the debug kit is completely generic and reusable in any libctru homebrew
-- **Non-blocking socket** serviced from your main loop via `dbg_poll()` — debugging never stalls your application
-- **Software breakpoints** (ARM `BKPT #0`) — cooperative, trapped at next `dbg_poll()`
-- **Framebuffer streaming** — generic pixel dump helpers for any screen or arbitrary address range
-- **SOC service integration** — proper 3DS socket initialization via `soc:u`
+Because this port runs the original code, the game *is* SimCity — same
+behaviour, same graphics, same simulation. Nothing here reimplements the game
+logic.
 
----
+## What this project is not
 
-## Integration (3 lines in your homebrew)
+- **Not an emulator.** There is no interpreter, no JIT, no dynamic
+  recompilation. The original game code is translated ahead of time into
+  native ARM11 machine code that runs directly.
+- **Not a ROM distribution.** See [Legal](#legal).
+- **Not finished.** See [Status](#status--measured).
 
-```c
-#include "3dsdbg.h"
+## How it works
 
-int main() {
-    // ... your init ...
-    dbg_init();              // once, after SOC/gfx are up
+The upstream project provides a static recompilation of SimCity (USA) as
+hand-written C plus a large set of generated dispatch shards. This port:
 
-    while (aptMainLoop()) {
-        // ... your frame logic ...
-        dbg_poll();          // once per iteration
-    }
-    return 0;
-}
-```
+1. **Reuses that core.** It compiles and runs as-is on ARM11. The generated
+   shards (v11/v34/v35/v36) are ROM-certified and are kept byte-identical to
+   upstream — nothing in this repository modifies them.
+2. **Patches it, never edits it.** `patches/` holds a chain applied on every
+   build, so any build is reproducible from a clean checkout. See
+   [Patch chain](#patch-chain).
+3. **Writes its own 3DS frontend** — `frontend/3ds/` — using libctru: video,
+   input, audio, and a debug bridge.
+4. **Carries a debug bridge**, `3dsdbgkit`, over TCP. It started as the way to
+   inspect a running port and became a reusable component in its own right,
+   with a GDB RSP stub alongside a line-oriented command protocol.
 
-Then from host:
-```bash
-arm-none-eabi-gdb your.elf
-(gdb) target remote 192.168.1.42:5002
-(gdb) break main
-(gdb) continue
-```
+### Why static recompilation
 
-Extension commands (plain text lines, not RSP packets):
-```
-ping           → OK pong
-info           → OK 3dsdbgkit/1 pid=ok breaks=0
-brk 0x00102000 → OK break set
-dumpmem 0x00100000 256 → OK dumping + binary blob
-```
+The original runs at the speed of a 1991 Super Nintendo. Transliterating it to
+hand-written C would be a rewrite and would drift from the original over time.
+Static recompilation keeps the fidelity: every instruction, every table, every
+timing quirk, translated mechanically. The result is a program that is
+genuinely the original game, compiled for a different CPU.
 
----
+The cost is that the generated code is large and the profiling is unusual — most
+of the per-frame time is in host-side glue, not in the emulated CPU. That
+shapes most of the work in this repository.
 
-## Current state, measured
+## Status, measured
 
-Performance work so far, all measured on hardware. `core` is
-`simcity_recomp_advance()` in ARM11 ticks per frame.
+Performance work so far, all measured in ARM11 ticks per frame. `core` is
+`simcity_recomp_advance()`.
 
 | Change | Effect | Evidence |
 |---|---|---|
-| `bgra()` integer divides → exact 32-entry table | shipped; the reported −23.7% is **retracted**, see below | `tools/check_rgb565_exact.c`, 0 divergences over all 32768 inputs |
-| Core log off by default (removes 2× per-frame SHA-256) | **−14.5%**, active by default | reproduced over 12 interleaved pairs, +21.8M ticks |
-| Read frame as BGR555 instead of re-widening BGRA | **no measurable gain** | −1.1%, inside measurement noise |
+| Core log off by default (removes 2× per-frame SHA-256) | **−14.5%**, active | 12 interleaved pairs, +21.8M ticks |
+| `bgra()` integer divides → exact 32-entry table | shipped | output proven identical, 0/32768 divergences |
+| Read frame as BGR555 instead of re-widening BGRA | **no measurable gain** | −1.1%, inside noise |
 
-Three things worth knowing before trusting any number here:
+Three things you need before trusting any number in this table:
 
 1. **`core` is not a stable clock.** It varies by up to **42%** with scene
-   content. Measuring change A and then change B minutes apart measures the
+   content. Measuring change A and then change B minutes apart measures that
    drift, not the change. Every real result here uses interleaved pairs with
    the difference taken *within* each pair, and discards contaminated pairs
    rather than averaging them in.
 2. **An earlier −23.7% figure was retracted.** Drift alone moves 50M ticks
-   against a reported 46M effect. The change stays (it is provably
-   output-identical and removes 183 584 divides); the *number* was not sound.
-3. **Nothing has been verified for output equality on hardware.** The colour
-   conversion is proven exhaustively on the host. A device-side equivalence test
+   against a reported 46M effect. The change stayed — it is provably
+   output-identical and removes 183 584 divides — but the number was not sound.
+3. **Output equality has never been verified on hardware.** The colour
+   conversion is proven exhaustively on the host over all 32768 possible pixel
+   values, which cannot catch a stride or rotation error. On-device equivalence
    needs a same-frame capture from both builds and has not been done.
 
-Still unattributed: the large majority of per-frame ticks, spread across the
+**Still unattributed:** the large majority of per-frame ticks, spread across the
 static route loop, `smp_sync_to_master` (the DSP) and the composite pass.
+Optimising before finding that is what produced the −1.1% row above.
 
-### Patches, not edits
-
-The upstream core is never edited in place. `patches/` holds a chain applied on
-every build, so a build is reproducible from a clean checkout:
+### Patch chain
 
 | Patch | Purpose |
 |---|---|
@@ -111,73 +107,88 @@ every build, so a build is reproducible from a clean checkout:
 | `0003-core-expose-bgr555.patch` | exposes the composited frame the core already builds |
 | `0004-core-switchable-analyze.patch` | makes `analyze()` measurable |
 
-The generated dispatch shards (v11/v34/v35/v36) are ROM-certified and remain
-byte-identical to upstream.
-
----
-
-## Project Layout
-
-```
-3dsdbgkit/
-├── frontend/3ds/
-│   ├── 3dsdbg.c/h      ← Core debug bridge (GDB RSP + extension)
-│   ├── 3ds_main.c      ← Example host application entry point
-│   ├── 3ds_render.c/h  ← Example rendering
-│   └── 3ds_input.c/h   ← Example input handling
-├── frontend/ds/        ← Nintendo DS frontend (separate target)
-├── src/                ← Static-recompiled SimCity core (upstream, read-only)
-├── debug/              ← Debug artifacts, test images, rotation analysis
-├── tools/              ← Host-side helpers (netdbg.py, dsdbg.py, raw2png.py)
-├── investigation/      ← ARMv7/3DSX packing experiments
-├── docs/
-│   ├── VISION.md
-│   ├── REQUIREMENTS.md
-│   └── ROADMAP.md
-├── CMakeLists.txt      ← Cross-compile for ARM11 (3DS) and ARM9 (DS)
-├── Makefile            ← Convenience targets (docker-build, doctor, etc.)
-└── .gitignore          ← Excludes build/, objs/, *.nds, *.3dsx, aes/, .aes/
-```
-
----
-
-## Build
+## Building
 
 ```bash
-# Inside Docker (recommended — pulls devkitpro/devkitarm)
-make docker-build
-
-# Or with native devkitARM installed
-make 3ds-build
+make docker-build      # inside Docker (devkitpro/devkitarm)
 ```
 
-## Test / Debug
+You need a legally obtained **SimCity (USA)** `.sfc` at `~/SimCity(USA).sfc`.
+The build does not embed it; the frontend loads it at runtime.
+
+`make doctor` checks the environment. See `Makefile` for the other targets.
+
+## Running it on hardware
+
+The frontend expects the ROM on the SD card at `sdmc:/SimCity(USA).sfc`, and
+listens for the debug bridge on TCP **5002**. Host-side helpers live in
+`tools/`:
+
+| Tool | Purpose |
+|---|---|
+| `deck_ab.py` | paired A/B performance measurement (see below) |
+| `netfb.py` | pull live pixels off the device as PNG |
+| `play.py` | drive the game and capture after draining frames |
+| `netdbg.py` | host-side GDB attach |
+| `raw2png.py` | convert raw framebuffer dumps |
+
+## Running it headless
+
+The port runs under **Azahar** (a Citra fork), which gives a repeatable test
+target with no physical interaction. Guest TCP works: the debug bridge binds and
+is reachable from the host.
+
+This was verified rather than assumed — emulators are commonly expected *not*
+to provide guest networking, and the whole harness design depended on the
+answer.
+
+One important limit: **tick counts in an emulator are not the same clock as
+tick counts on hardware.** They are useful for functional tests and for effects
+well above the noise, and misleading for small ones. `deck_ab.py` reports
+`UNRESOLVABLE` rather than a number when an effect is below the noise floor,
+because that is what it means.
 
 ```bash
-# Headless frame validation (requires ROM at ~/SimCity(USA).sfc)
-make 3ds-test-headless
-
-# Doctor: check environment
-make doctor
-
-# Host-side GDB attach helper
-python3 tools/netdbg.py <3ds-ip>
+python3 tools/deck_ab.py --host <target> --switch cclog --pairs 12
 ```
 
-## Requirements
+## Legal
 
-- Docker with `devkitpro/devkitarm` image (pulled automatically by `make setup`)
-- A legally obtained SimCity (USA) SNES ROM at `~/SimCity(USA).sfc` (for the example app)
-- melonDS or DeSmuME for DS target; Citra or real 3DS for 3DS target
+This repository contains **no ROM, no ROM image, and no copy of Nintendo or
+Maxis code**. Two copyrighted `.cia` dumps were accidentally committed in the
+initial commit; that history was rewritten and the repository recreated without
+them. The `.gitignore` rules that were supposed to prevent it could not, because
+a `.gitignore` pattern does not apply to an already-tracked path.
+
+You must supply your own legally obtained copy of SimCity (USA). The game is
+copyrighted by Maxis/Nintendo; this project is an unofficial port and is not
+affiliated with or endorsed by either.
+
+## Layout
+
+```
+SimCity-3DS-Port/
+├── frontend/3ds/        3DS frontend: main loop, render, input, audio
+│   ├── 3ds_main.c       frame loop, profiling, lifecycle
+│   ├── 3ds_render.c     RGB565, rotation, channel order
+│   ├── 3dsdbg.c/h       the debug bridge (GDB RSP + command protocol)
+│   └── ds3ftp.c/h       in-app FTP, for shipping builds to the SD card
+├── frontend/ds/         Nintendo DS frontend (separate target, less advanced)
+├── patches/             the patch chain, applied on every build
+├── src/                 the static-recompiled core (upstream; see note)
+├── tools/               host-side helpers
+├── investigation/       experiments, including ARMv7/3DSX packing
+├── docs/                vision, requirements, roadmap, port study
+├── CMakeLists.txt       cross-compile for ARM11 (3DS) and ARM9 (DS)
+└── Makefile             docker-build, doctor, and friends
+```
+
+`src/` and the generated shards come from the upstream static recompilation and
+are modified only through `patches/`, never in place.
 
 ## Related
 
-- **Upstream core**: SimCity SNES Static Recomp 1.4.0 (handwritten sources + generated dispatch shards)
-- **DS port**: Separate frontend in `frontend/ds/` targeting ARM9 / libnds
-- **3dsdbgkit**: This debug bridge — reusable in any libctru homebrew
-
----
-
-## License
-
-MIT — see [LICENSE](LICENSE).
+- **Upstream**: SimCity SNES Static Recomp — the static recompilation this port
+  is built on.
+- **3dsdbgkit**: the debug bridge in `frontend/3ds/3dsdbg.c` is generic and
+  reusable in any libctru homebrew. It has no SimCity dependency.

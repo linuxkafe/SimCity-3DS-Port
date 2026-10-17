@@ -504,9 +504,14 @@ static void dbgk_ext(const char *line) {
            scene content by up to 42%. */
         int on = 1;
         if (sscanf(line, "%*s %d", &on) != 1) { dbgk_send_str("ERR args\n"); return; }
+        /* on=1 means "analyze ON", so skip=0. The reply used to say
+           "anlz=1 analyze=skipped" for exactly that case, which is the
+           opposite of what the flag does -- and it is the kind of lie a
+           measurement script cannot detect, because it only sees numbers.
+           The reply now names the state that was actually set. */
         sc_core_set_skip_analyze(on ? 0 : 1);
-        dbgk_send_str(on ? "OK anlz=1 analyze=skipped\n"
-                         : "OK anlz=0 analyze=running\n");
+        dbgk_send_str(on ? "OK anlz=1 analyze=running\n"
+                         : "OK anlz=0 analyze=skipped\n");
     } else if (!strcmp(verb, "cclog")) {
         /* Toggles the CORE's log handle, not the frontend trace.
            This is not a convenience verb. sc_core_logging_enabled() is just
