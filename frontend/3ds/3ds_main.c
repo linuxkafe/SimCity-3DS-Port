@@ -238,6 +238,7 @@ SimCityRecompFrameResult ds3_advance_frame(void) {
         return result;
     }
 
+    uint64_t t_core = svcGetSystemTick();
     uint16_t input = ds3_input_read();
     ds3_input_update_soft_pointer();
 
@@ -257,6 +258,9 @@ SimCityRecompFrameResult ds3_advance_frame(void) {
     int rc = simcity_recomp_advance(g_recomp, input, 1u, &result);
     if (g_trace_perframe)
         ds3_trace("[T5] simcity_recomp_advance returned rc=%d", rc);
+    g_dbg_phase_us[DBGK_PHASE_CORE] =
+        (uint32_t)(svcGetSystemTick() - t_core);
+    uint64_t t_render = svcGetSystemTick();
     if (rc != 1) {
         snprintf(result.renderer_error, sizeof(result.renderer_error),
                  "Advance failed (error=%d). %s", rc,
@@ -295,11 +299,21 @@ SimCityRecompFrameResult ds3_advance_frame(void) {
                          CORE_FRAME_CROP_RIGHT);
     }
 
-    /* Render HUD on bottom screen */
+    g_dbg_phase_us[DBGK_PHASE_RENDER] =
+        (uint32_t)(svcGetSystemTick() - t_render);
+    uint64_t t_hud = svcGetSystemTick();
+
+    /* Render HUD on bottom screen. Gated: by default this clears the console
+       and rewrites the whole bottom framebuffer every single frame, which both
+       costs time and wipes any diagnostic printed at boot. */
+    if (g_dbg_hud) {
     uint64_t instr_count = simcity_recomp_instruction_count(g_recomp);
     uint64_t master_clk  = simcity_recomp_master_clock(g_recomp);
     uint32_t frame_num   = simcity_recomp_current_frame(g_recomp);
     ds3_render_hud(instr_count, master_clk, frame_num, result.renderer_error);
+    g_dbg_phase_us[DBGK_PHASE_HUD] =
+        (uint32_t)(svcGetSystemTick() - t_hud);
+    }
 
     return result;
 }
@@ -335,15 +349,19 @@ static void ds3_dbg_state(char *buf, unsigned capacity) {
     snprintf(buf, capacity,
              "frame=%u src=%p src_w=%u src_h=%u instructions=%llu master=%llu "
              "input=0x%04X injected=0x%04X chan=%d rot=%d "
-             "adv=%u audio=%u dbg=%u present=%u loop=%u last_error=%s",
+             "build=" DS3_BUILD_ID " hud=%d adv=%u core=%u render=%u hudus=%u "
+             "audio=%u dbg=%u present=%u loop=%u ftp=%d last_error=%s",
              frame, src, fw, fh, instr, master,
              (unsigned)g_last_input, (unsigned)g_dbg_input,
-             g_dbg_chan_swap, g_dbg_rotate_mode,
+             g_dbg_chan_swap, g_dbg_rotate_mode, g_dbg_hud,
              (unsigned)g_dbg_phase_us[DBGK_PHASE_ADVANCE],
+             (unsigned)g_dbg_phase_us[DBGK_PHASE_CORE],
+             (unsigned)g_dbg_phase_us[DBGK_PHASE_RENDER],
+             (unsigned)g_dbg_phase_us[DBGK_PHASE_HUD],
              (unsigned)g_dbg_phase_us[DBGK_PHASE_AUDIO],
              (unsigned)g_dbg_phase_us[DBGK_PHASE_DEBUG],
              (unsigned)g_dbg_phase_us[DBGK_PHASE_PRESENT],
-             (unsigned)g_dbg_phase_us[DBGK_PHASE_LOOP], err);
+             (unsigned)g_dbg_phase_us[DBGK_PHASE_LOOP], g_ftp_listen_fd, err);
 }
 
 int main(int argc, char **argv) {

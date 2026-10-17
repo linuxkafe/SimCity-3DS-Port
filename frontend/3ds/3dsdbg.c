@@ -409,6 +409,12 @@ volatile int      g_dbg_input_frames = 0; /* >0: release after N advances */
 volatile int g_dbg_chan_swap = 0;
 volatile int g_dbg_quit = 0;
 volatile int g_dbg_trace_perframe = 0;
+volatile int g_dbg_hud = 1;
+
+/* FTP listener state, reported through `info` so a failed bind is visible over
+   the debug port instead of only on a console that gets cleared every frame. */
+int  g_ftp_listen_fd = -1;
+int  g_ftp_last_error = 0;
 
 volatile uint32_t g_dbg_phase_us[DBGK_PHASE_COUNT];
 volatile uint32_t g_dbg_phase_avg[DBGK_PHASE_COUNT];
@@ -445,8 +451,10 @@ static void dbgk_ext(const char *line) {
     if (!strcmp(verb, "ping")) {
         dbgk_send_str("OK pong\n");
     } else if (!strcmp(verb, "info")) {
-        char m[128];
-        snprintf(m, sizeof(m), "OK 3dsdbgkit/1 pid=ok breaks=%d\n", g_break_count);
+        char m[224];
+        snprintf(m, sizeof(m),
+                 "OK 3dsdbgkit/2 build=%s breaks=%d ftp_listen=%d ftp_errno=%d\n",
+                 DS3_BUILD_ID, g_break_count, g_ftp_listen_fd, g_ftp_last_error);
         dbgk_send_str(m);
     } else if (!strcmp(verb, "state")) {
         if (!g_state_fn) { dbgk_send_str("ERR nostate\n"); return; }
@@ -461,6 +469,13 @@ static void dbgk_ext(const char *line) {
         g_dbg_rotate_mode = mode;
         char m[32];
         snprintf(m, sizeof(m), "OK rot=%d\n", mode);
+        dbgk_send_str(m);
+    } else if (!strcmp(verb, "hud")) {
+        int on = 1;
+        if (sscanf(line, "%*s %d", &on) != 1) { dbgk_send_str("ERR args\n"); return; }
+        g_dbg_hud = on ? 1 : 0;
+        char m[48];
+        snprintf(m, sizeof(m), "OK hud=%d\n", g_dbg_hud);
         dbgk_send_str(m);
     } else if (!strcmp(verb, "trace")) {
         int on = 0;
@@ -492,18 +507,23 @@ static void dbgk_ext(const char *line) {
     } else if (!strcmp(verb, "prof")) {
         char m[320];
         int n = snprintf(m, sizeof(m),
-            "OK now[adv=%uus audio=%uus dbg=%uus present=%uus loop=%uus] "
+            "OK now[adv=%u core=%u render=%u hud=%u audio=%u dbg=%u present=%u loop=%u] "
             "avg[adv=%uus audio=%uus dbg=%uus present=%uus loop=%uus]",
             (unsigned)g_dbg_phase_us[DBGK_PHASE_ADVANCE],
             (unsigned)g_dbg_phase_us[DBGK_PHASE_AUDIO],
             (unsigned)g_dbg_phase_us[DBGK_PHASE_DEBUG],
             (unsigned)g_dbg_phase_us[DBGK_PHASE_PRESENT],
             (unsigned)g_dbg_phase_us[DBGK_PHASE_LOOP],
+            (unsigned)g_dbg_phase_us[DBGK_PHASE_CORE],
+            (unsigned)g_dbg_phase_us[DBGK_PHASE_RENDER],
+            (unsigned)g_dbg_phase_us[DBGK_PHASE_HUD],
             (unsigned)g_dbg_phase_avg[DBGK_PHASE_ADVANCE],
             (unsigned)g_dbg_phase_avg[DBGK_PHASE_AUDIO],
             (unsigned)g_dbg_phase_avg[DBGK_PHASE_DEBUG],
             (unsigned)g_dbg_phase_avg[DBGK_PHASE_PRESENT],
             (unsigned)g_dbg_phase_avg[DBGK_PHASE_LOOP]);
+        if (n < 0) n = 0;
+        if ((size_t)n >= sizeof(m)) n = (int)sizeof(m) - 1;
         dbgk_send_bytes(m, (size_t)n);
         dbgk_send_str("\n");
     } else if (!strcmp(verb, "put")) {

@@ -277,6 +277,7 @@ void ds3ftp_init(void) {
 
     g_listen = socket(AF_INET, SOCK_STREAM, IPPROTO_IP);
     if (g_listen < 0) {
+        g_ftp_last_error = errno;
         printf("[ftp] socket() failed: %d %s\n", errno, strerror(errno));
         return;
     }
@@ -290,10 +291,12 @@ void ds3ftp_init(void) {
         listen(g_listen, FTP_BACKLOG) != 0) {
         printf("[ftp] bind/listen on %d failed: %d %s\n",
                FTP_PORT, errno, strerror(errno));
+        g_ftp_last_error = errno;
         close(g_listen);
         g_listen = -1;
         return;
     }
+    g_ftp_listen_fd = g_listen;
     fcntl(g_listen, F_SETFL, fcntl(g_listen, F_GETFL, 0) | O_NONBLOCK);
     printf("[ftp] listening on %d, root sdmc:/\n", FTP_PORT);
 }
@@ -302,6 +305,7 @@ void ds3ftp_exit(void) {
     if (g_xfer_file) { fclose(g_xfer_file); g_xfer_file = NULL; }
     if (g_client >= 0) { close(g_client); g_client = -1; }
     if (g_listen >= 0) { close(g_listen); g_listen = -1; }
+    g_ftp_listen_fd = -1;
 }
 
 void ds3ftp_poll(void) {

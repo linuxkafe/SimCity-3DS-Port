@@ -76,7 +76,11 @@ extern volatile int g_dbg_chan_swap;
  * where a frame goes is to guess, and guessing here has already been wrong
  * twice. Phase indices are the DBGK_PHASE_* constants. */
 enum {
-    DBGK_PHASE_ADVANCE = 0,  /* core advance + render + HUD */
+    DBGK_PHASE_ADVANCE = 0,  /* whole ds3_advance_frame */
+    DBGK_PHASE_CORE,         /* simcity_recomp_advance + frame_bgra */
+    DBGK_PHASE_RENDER,       /* ds3_render_frame: memset + pixel loop */
+    DBGK_PHASE_HUD,          /* ds3_render_hud: printf, clears console */
+
     DBGK_PHASE_AUDIO,         /* ds3_audio_pump */
     DBGK_PHASE_DEBUG,         /* dbgk_poll + break check */
     DBGK_PHASE_PRESENT,       /* VBlank wait + buffer swap */
@@ -112,6 +116,21 @@ extern volatile int g_dbg_quit;
    than everything else in the loop put together. On when a crash needs
    localising, because the log survives an abort that would eat buffered writes. */
 extern volatile int g_dbg_trace_perframe;
+
+/* build identity, so the host can confirm what is actually running on the
+   device instead of assuming the card holds what was last uploaded */
+#define DS3_BUILD_ID "f19ae9b8"
+
+/* Set by the `hud` verb. The console redraws the whole bottom framebuffer and
+   clears the screen every frame by default, which both costs time and destroys
+   any diagnostic message printed at boot before anyone can read it. */
+extern volatile int g_dbg_hud;
+
+/* FTP listener state, reported through `info`. A failed bind used to be visible
+   only on the console, which ds3_render_hud cleared on the very next frame, so
+   the reason was unrecoverable from the host. */
+extern int g_ftp_listen_fd;
+extern int g_ftp_last_error;
 
 /* Service the server: accept a client, read commands, reply. Non-blocking;
    call once per iteration of the host application's main loop. */
