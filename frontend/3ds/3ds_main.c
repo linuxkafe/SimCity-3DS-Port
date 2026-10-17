@@ -186,10 +186,25 @@ int ds3_init(const char *rom_path, char *out_error, size_t error_capacity) {
         return 0;
     }
 
-    /* Open log if requested */
-    ds3_trace("[T2] log_open: begin");
-    simcity_recomp_log_open("sdmc:/simcity-3ds.log", NULL, 0);
-    ds3_trace("[T2] log_open: done");
+    /* The core log is OFF by default, and this used to be a silent 14.5% tax.
+
+       sc_core_logging_enabled() is `g_core_log != NULL`, and render_lines_impl
+       gates two SHA-256 passes behind it: 122368 bytes of out555 plus 244736
+       of out32. With this log open, both ran every frame -- 367 KB hashed per
+       frame to fill two report fields the 3DS frontend never reads.
+
+       Measured on device, 12 interleaved pairs, same build, same ROM:
+           mean  +21 307 873 ticks  (+14.5% of the frame)
+           range +18.2M .. +23.6M, every pair positive
+       The interleaving matters: `core` also varies by up to 42% with scene
+       content, so measuring the two arms minutes apart gave a bimodal set
+       whose average said the opposite. See aes/tickets/T028.
+
+       Nothing is lost. The core log carried "create", "cold-reset-ready",
+       "route-failed" and "frame" events; this frontend has its own ds3_trace
+       for all of that, and `cclog 1` reopens the core log on demand for when
+       the upstream events are actually wanted. */
+    ds3_trace("[T2] core log: off by default (cclog 1 to enable; sha256 costs ~14.5%)");
 
     /* Reset to cold boot state */
     char reset_err[256];
