@@ -847,11 +847,21 @@ void dbgk_poll(void) {
 
     char tmp[512];
     ssize_t n = recv(g_client_fd, tmp, sizeof(tmp), 0);
-    /* Close on ANY non-positive recv, not just a clean FIN. Returning early on
-       -1 kept a dead peer in g_client_fd forever; the bridge accepts one client
-       at a time, so one host that vanished without closing made the port look
-       dead to every later connection, including the operator's. */
-    if (n <= 0) {
+    /* A non-blocking recv with nothing to read returns -1/EAGAIN. That is not a
+       disconnect, and treating it as one kills every connection before the peer
+       can send anything. Only a clean EOF (n == 0) or a real error closes.
+
+       The previous version here tested n <= 0, which conflated the two: the
+       FTP and debug ports both accepted a client, greeted it, and dropped it on
+       the very next poll. The n == 0 check alone was closer to right but still
+       leaked the socket when a peer vanished with an error. */
+    if (n == 0) {
+        close(g_client_fd);
+        g_client_fd = -1;
+        return;
+    }
+    if (n < 0) {
+        if (errno == EAGAIN || errno == EWOULDBLOCK || errno == EINTR) return;
         close(g_client_fd);
         g_client_fd = -1;
         return;

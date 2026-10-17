@@ -342,6 +342,9 @@ void ds3ftp_poll(void) {
             g_xfer_left -= (long)got;
         } else {
             ssize_t n = recv(data_fd, g_rbuf, sizeof(g_rbuf), 0);
+            if (n < 0 && (errno == EAGAIN || errno == EWOULDBLOCK || errno == EINTR)) {
+                return;
+            }
             if (n <= 0) {
                 close(data_fd); data_fd = -1;
                 fclose(g_xfer_file); g_xfer_file = NULL;
@@ -356,7 +359,15 @@ void ds3ftp_poll(void) {
 
     char tmp[512];
     ssize_t n = recv(g_client, tmp, sizeof(tmp), 0);
-    if (n <= 0) {
+    /* n < 0/EAGAIN just means the client has not typed yet. Closing on it is
+       what made every connection die right after the banner. */
+    if (n == 0) {
+        close(g_client);
+        g_client = -1;
+        return;
+    }
+    if (n < 0) {
+        if (errno == EAGAIN || errno == EWOULDBLOCK || errno == EINTR) return;
         close(g_client);
         g_client = -1;
         return;
