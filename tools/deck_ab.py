@@ -129,7 +129,6 @@ def main():
 
     b.cmd("%s 0" % args.switch)              # leave in the cheap state
     print()
-    print("  raw pairs        : %d" % len(diffs))
 
     # Band from the median ABSOLUTE DEVIATION, not from the median.
     #
