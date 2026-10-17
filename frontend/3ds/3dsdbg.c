@@ -32,6 +32,15 @@
 
 #include "simcity_static_recomp.h"
 
+/* Core internals the harness needs but the public header does not expose.
+   sc_core_logging_enabled() gates the per-frame SHA-256 (see cclog);
+   sc_core_get/set_skip_analyze() gate the per-frame pixel walk (see anlz).
+   Both are diagnostics, so neither widens the core's public API for the
+   frontend's benefit. */
+extern int sc_core_logging_enabled(void);
+extern int sc_core_get_skip_analyze(void);
+extern void sc_core_set_skip_analyze(int skip);
+
 #include <3ds.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -457,14 +466,16 @@ static void dbgk_ext(const char *line) {
         /* cclog is reported here because every measurement has to be
            attributable: a `core` number means nothing without knowing whether
            the per-frame SHA-256 was running during it.
+           anlz is reported for the same reason: analyze() is not behind cclog,
+           so a `core` number is equally unattributable without it.
            Not in the public header -- declared here rather than widening the
            core's API for a diagnostic that only the harness needs. */
-        extern int sc_core_logging_enabled(void);
         char m[224];
         snprintf(m, sizeof(m),
-                 "OK 3dsdbgkit/2 build=%s breaks=%d ftp_listen=%d ftp_errno=%d cclog=%d\n",
+                 "OK 3dsdbgkit/2 build=%s breaks=%d ftp_listen=%d ftp_errno=%d cclog=%d anlz=%d\n",
                  DS3_BUILD_ID, g_break_count, g_ftp_listen_fd, g_ftp_last_error,
-                 sc_core_logging_enabled() ? 1 : 0);
+                 sc_core_logging_enabled() ? 1 : 0,
+                 sc_core_get_skip_analyze() ? 1 : 0);
         dbgk_send_str(m);
     } else if (!strcmp(verb, "state")) {
         if (!g_state_fn) { dbgk_send_str("ERR nostate\n"); return; }
@@ -480,6 +491,22 @@ static void dbgk_ext(const char *line) {
         char m[32];
         snprintf(m, sizeof(m), "OK rot=%d\n", mode);
         dbgk_send_str(m);
+    } else if (!strcmp(verb, "anlz")) {
+        /* Toggles analyze(), which is NOT behind cclog -- it runs on every
+           full_frame regardless of logging, so the T028 saving did not include
+           it. It walks all 61184 pixels through a 4096-slot open-addressed set
+           with linear probing to fill two counters this frontend never reads.
+
+           Same shape as cclog and for the same reason: both states have to be
+           measurable in one session on one build, or the two arms are not
+           comparable and the difference means nothing. T028 also showed the
+           arms must be interleaved, not run in sequence -- `core` drifts with
+           scene content by up to 42%. */
+        int on = 1;
+        if (sscanf(line, "%*s %d", &on) != 1) { dbgk_send_str("ERR args\n"); return; }
+        sc_core_set_skip_analyze(on ? 0 : 1);
+        dbgk_send_str(on ? "OK anlz=1 analyze=skipped\n"
+                         : "OK anlz=0 analyze=running\n");
     } else if (!strcmp(verb, "cclog")) {
         /* Toggles the CORE's log handle, not the frontend trace.
            This is not a convenience verb. sc_core_logging_enabled() is just

@@ -1,0 +1,86 @@
+Subject: [PATCH] core: make analyze() switchable so its cost can be measured
+
+analyze() walks all 61184 composited pixels through a 4096-slot open-addressed
+set with linear probing, every frame, to fill two counters in the video report:
+nonblack_pixels and unique_colors. The 3DS frontend reads neither.
+
+The cost is unknown, which is the problem. T026 tried to speed up the frontend
+render because it looked expensive, measured -1.1%, and that was noise. The
+lesson there was to measure before optimising, and this makes the measurement
+possible in the same session on the same build, by toggling rather than
+rebuilding -- a rebuild between two arms would make them incomparable.
+
+Default is 0, so the PC build and every existing caller are byte-for-byte
+unchanged. This is a switch for the harness, not an optimisation.
+
+When skipping, the counters are set to zero rather than left holding the
+previous frame's values. A host that reads them while skipping must not be shown
+stale numbers as if they were current.
+
+Also documents a latent hazard that this makes reachable: the set has 4096
+slots, but the reported distinct count is clamped at 1024, which implies the
+author expected far more distinct values than the clamp admits. If distinct
+ever exceeds 4096 the table is full, the probe loop finds neither an empty slot
+nor a match, and `for (;;)` never terminates. It does not fire today because
+the real distinct count is small. Not fixed here -- changing the probe would
+alter report values, and that is not this patch's business.
+
+--- a/internal/include/sc_core_internal.h
++++ b/internal/include/sc_core_internal.h
+@@ -18,3 +18,23 @@
+ uint32_t sc_crc32_bytes(const unsigned char *data, size_t size);
+ 
+ #endif
++
++/* Diagnostic switch for analyze() in sc_v28_video.c.
++ *
++ * analyze() walks every composited pixel through a 4096-slot open-addressed
++ * set with linear probing, purely to fill two report counters. Hosts that do
++ * not read those counters can turn it off and stop paying for it.
++ *
++ * Default 0 -- unchanged behaviour, so the PC build and any existing caller
++ * get exactly what they got before. This exists so the cost can be MEASURED
++ * rather than assumed, which is the only reason it is switchable at all.
++ *
++ * Note the latent hazard this makes reachable to toggle: the set has 4096
++ * slots and the reported distinct count is clamped at 1024, implying the
++ * author expected more distinct values than that. If distinct ever exceeds
++ * 4096 the table is full, the probe loop finds neither an empty slot nor a
++ * match, and `for (;;)` never terminates. Do not raise expectations on
++ * SC_ANALYZE_SET_SLOTS without fixing that first. */
++extern int sc_core_skip_analyze;
++extern void sc_core_set_skip_analyze(int skip);
++extern int sc_core_get_skip_analyze(void);
+--- a/src/simcity_static_recomp.c
++++ b/src/simcity_static_recomp.c
+@@ -101,6 +101,10 @@
+     return g_core_log != NULL;
+ }
+ 
++int sc_core_skip_analyze = 0;
++void sc_core_set_skip_analyze(int skip) { sc_core_skip_analyze = skip ? 1 : 0; }
++int sc_core_get_skip_analyze(void) { return sc_core_skip_analyze; }
++
+ void simcity_recomp_log_close(void) {
+     if (!g_core_log) return;
+     core_logf(NULL, "log-close", "");
+--- a/src/sc_v28_video.c
++++ b/src/sc_v28_video.c
+@@ -1137,8 +1137,15 @@
+     result.reached_feature_set_supported =
+         (uint8_t)(supported_lines == SC_V11_PPU_VISIBLE_LINES);
+     if (full_frame) {
+-        analyze(out32, output_pixels,
+-                &result.nonblack_pixels, &result.unique_colors);
++        if (!sc_core_skip_analyze) {
++            analyze(out32, output_pixels,
++                    &result.nonblack_pixels, &result.unique_colors);
++        } else {
++            /* Zero rather than stale: a host reading these while skipping must
++               not see the previous frame's numbers presented as this frame's. */
++            result.nonblack_pixels = 0u;
++            result.unique_colors = 0u;
++        }
+         if (sc_core_logging_enabled()) {
+             sc_sha256_bytes((const unsigned char *)out555,
+                             output_pixels * sizeof(*out555),
