@@ -408,8 +408,12 @@ static void dbgk_handle_rsp(char *pkt) {
 /* Application-supplied formatter for the `state` verb. NULL until the host
    application registers one; the bridge stays game-agnostic. */
 static dbgk_state_fn g_state_fn = NULL;
+static dbgk_reset_fn g_reset_fn = NULL;
+static dbgk_hash_fn  g_frame_hash_fn = NULL;
 
 void dbgk_set_state_fn(dbgk_state_fn fn) { g_state_fn = fn; }
+void dbgk_set_reset_fn(dbgk_reset_fn fn) { g_reset_fn = fn; }
+void dbgk_set_hash_fn(dbgk_hash_fn fn) { g_frame_hash_fn = fn; }
 
 volatile int g_dbg_pause = -1;   /* -1 = host not driving */
 volatile int g_dbg_step  = 0;    /* frames the host asked to advance */
@@ -658,6 +662,30 @@ static void dbgk_ext(const char *line) {
     } else if (!strcmp(verb, "run")) {
         g_dbg_pause = 0;
         dbgk_send_str("OK running\n");
+    } else if (!strcmp(verb, "hash")) {
+        /* The composited frame's SHA-256, as 64 hex chars.
+           Requires `cclog 1`: with the core log closed nothing recomputes the
+           digest and this returns the PREVIOUS frame's value. That is stated in
+           the header rather than worked around here, because working around it
+           would hide the fact that the caller is comparing stale data. */
+        const char *h = g_frame_hash_fn ? g_frame_hash_fn() : NULL;
+        if (!h) { dbgk_send_str("ERR nohash\n"); return; }
+        char m[80];
+        snprintf(m, sizeof(m), "OK %s\n", h);
+        dbgk_send_str(m);
+    } else if (!strcmp(verb, "reset")) {
+        /* Cold reset to the state the ROM boots into. A determinism run needs
+           this: two runs that start from different frames cannot be compared. */
+        if (!g_reset_fn) { dbgk_send_str("ERR noreset\n"); return; }
+        char err[160];
+        err[0] = '\0';
+        if (g_reset_fn(err, (unsigned)sizeof(err)) != 1) {
+            char m[192];
+            snprintf(m, sizeof(m), "ERR reset failed: %s\n", err);
+            dbgk_send_str(m);
+            return;
+        }
+        dbgk_send_str("OK reset\n");
     } else if (!strcmp(verb, "step")) {
         int n = 1;
         if (sscanf(line, "%*s %d", &n) != 1) { dbgk_send_str("ERR args\n"); return; }

@@ -362,6 +362,22 @@ SimCityRecompFrameResult ds3_advance_frame(void) {
    the port cannot read these symbols itself — this is how the host learns where
    the core's frame lives so it can pull the pixels and compare them against the
    framebuffer. Everything the host needs to localise a render bug is here. */
+/* Returns the composited frame digest, or NULL if there is no instance.
+   STALE unless the core log is open -- the core only recomputes it behind
+   sc_core_logging_enabled(). That is why the harness must `cclog 1` first. */
+static const char *ds3_dbg_hash(void) {
+    return g_recomp ? simcity_recomp_frame_bgr555_sha256(g_recomp) : NULL;
+}
+
+/* Cold reset to the ROM's boot state, for determinism runs. */
+static int ds3_dbg_reset(char *err, unsigned capacity) {
+    if (!g_recomp) {
+        snprintf(err, capacity, "no-instance");
+        return 0;
+    }
+    return simcity_recomp_reset(g_recomp, err, capacity);
+}
+
 static void ds3_dbg_state(char *buf, unsigned capacity) {
     /* Every value is cast to the exact type the format string promises.
      * uint32_t is `unsigned long` on ARM32, so passing it straight to %u is a
@@ -371,6 +387,10 @@ static void ds3_dbg_state(char *buf, unsigned capacity) {
     unsigned long long instr = 0ull, master = 0ull;
     const void     *src = NULL;
     const char     *err = "no-instance";
+    /* First 16 hex chars of the frame digest. Named fhash, not fh: fh is the
+       frame height two declarations up. Truncated to 16 because `state` is a
+       one-line human readout and the full 64 are available from `hash`. */
+    char            fhash[17] = "----------------";
 
     if (g_recomp) {
         frame  = (unsigned)simcity_recomp_current_frame(g_recomp);
@@ -380,13 +400,21 @@ static void ds3_dbg_state(char *buf, unsigned capacity) {
         instr  = (unsigned long long)simcity_recomp_instruction_count(g_recomp);
         master = (unsigned long long)simcity_recomp_master_clock(g_recomp);
         err    = simcity_recomp_last_error(g_recomp);
+        {
+            const char *h = simcity_recomp_frame_bgr555_sha256(g_recomp);
+            /* All zeros means no frame has been hashed yet, or logging is off
+               and this is the previous frame's value. Showing the dashes
+               instead makes that visible rather than printing a plausible-
+               looking digest that means nothing. */
+            if (h && h[0] != '0') { memcpy(fhash, h, 16); fhash[16] = '\0'; }
+        }
     }
 
     snprintf(buf, capacity,
              "frame=%u src=%p src_w=%u src_h=%u instructions=%llu master=%llu "
              "input=0x%04X injected=0x%04X chan=%d rot=%d "
              "build=" DS3_BUILD_ID " mode=%d hud=%d adv=%u core=%u render=%u hudus=%u "
-             "audio=%u dbg=%u present=%u loop=%u ftp=%d last_error=%s",
+             "audio=%u dbg=%u present=%u loop=%u ftp=%d fh=%.16s last_error=%s",
              frame, src, fw, fh, instr, master,
              (unsigned)g_last_input, (unsigned)g_dbg_input,
              g_dbg_chan_swap, g_dbg_rotate_mode, g_dbg_advance_mode, g_dbg_hud,
@@ -397,7 +425,7 @@ static void ds3_dbg_state(char *buf, unsigned capacity) {
              (unsigned)g_dbg_phase_us[DBGK_PHASE_AUDIO],
              (unsigned)g_dbg_phase_us[DBGK_PHASE_DEBUG],
              (unsigned)g_dbg_phase_us[DBGK_PHASE_PRESENT],
-             (unsigned)g_dbg_phase_us[DBGK_PHASE_LOOP], g_ftp_listen_fd, err);
+             (unsigned)g_dbg_phase_us[DBGK_PHASE_LOOP], g_ftp_listen_fd, fhash, err);
 }
 
 int main(int argc, char **argv) {
@@ -433,6 +461,11 @@ int main(int argc, char **argv) {
     /* Bring up the TCP debug server (non-blocking). */
     dbgk_init();
     dbgk_set_state_fn(ds3_dbg_state);
+    /* Exposed for the determinism harness (T032). `reset` is what makes two
+       runs comparable: without it the second starts wherever the first ended,
+       and comparing frames then proves nothing. */
+    dbgk_set_reset_fn(ds3_dbg_reset);
+    dbgk_set_hash_fn(ds3_dbg_hash);
     ds3ftp_init();
 
     /* Print startup banner */

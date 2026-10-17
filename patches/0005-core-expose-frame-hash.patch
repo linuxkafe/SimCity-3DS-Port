@@ -1,0 +1,73 @@
+Subject: [PATCH] core: expose the composited frame's SHA-256 for determinism tests
+
+T026 shipped a change to the render path and its device-side output equality was
+never verified. The before/after PNG comparison was worthless because the two
+captures were of different game states -- one was frame 434, the other some
+unknown earlier moment. What existed was an exhaustive host-side proof over all
+32768 pixel values, which cannot catch a stride error, a rotation mistake, or a
+wrong buffer.
+
+That gap is why "the output is unchanged" is currently an argument. This exposes
+the digest the core already computes so it can be a check.
+
+render_lines_impl() already hashes the composited BGR555 frame per frame, but
+only behind sc_core_logging_enabled(), which T028 measured at 14.5% of the
+frame and which the 3DS port therefore leaves off by default. The accessor makes
+that existing work reachable without changing when it happens, so nothing about
+the default build path moves.
+
+The header documents the two traps, because both would produce a confident wrong
+answer rather than an obvious failure:
+
+  - With logging off the digest is NOT recomputed; it holds the previous frame's
+    value. A caller that forgets to enable logging compares stale data and
+    concludes the frames match when they were never hashed.
+  - It covers the composited frame only. It cannot see the frontend's rotation,
+    channel order or stride, which is precisely where T026's change lived.
+
+Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>
+--- a/include/simcity_static_recomp.h
++++ b/include/simcity_static_recomp.h
+@@ -168,6 +168,29 @@
+ 
+    Read-only, like frame_bgra. Valid until the next advance. */
+ const uint16_t *simcity_recomp_frame_bgr555(const SimCityRecomp *instance);
++
++/* SHA-256 of the composited BGR555 frame, as 64 lowercase hex chars + NUL.
++ *
++ * The digest render_lines_impl already computes for its own report -- but only
++ * while sc_core_logging_enabled() is true, which T028 measured at 14.5% of the
++ * frame. Exposed here so a harness can assert two runs produced identical
++ * output, which is the only way to make "this change did not alter the
++ * picture" a check rather than an opinion.
++ *
++ * Two things a caller must know:
++ *
++ *   - It is all '0' until a frame has been rendered, and it HOLDS ITS PREVIOUS
++ *     VALUE if logging is off, because nothing recomputes it. A caller that
++ *     compares digests without enabling logging first is comparing stale data
++ *     and will conclude the frames match when they were never hashed. The 3DS
++ *     port leaves the core log off by default for performance, so a determinism
++ *     run must turn it on.
++ *   - It covers the composited frame only. It says nothing about the frontend's
++ *     rotation, channel order or stride -- exactly where T026's change could
++ *     have broken the output without this digest noticing.
++ *
++ * Read-only. Valid until the next rendered frame. */
++const char *simcity_recomp_frame_bgr555_sha256(const SimCityRecomp *instance);
+ uint32_t simcity_recomp_frame_width(const SimCityRecomp *instance);
+ int simcity_recomp_widescreen_enabled(const SimCityRecomp *instance);
+ int simcity_recomp_set_widescreen(SimCityRecomp *instance, int enabled,
+--- a/src/simcity_static_recomp.c
++++ b/src/simcity_static_recomp.c
+@@ -1112,6 +1112,10 @@
+     return instance ? instance->bgr555 : NULL;
+ }
+ 
++const char *simcity_recomp_frame_bgr555_sha256(const SimCityRecomp *instance) {
++    return instance ? instance->video.bgr555_sha256 : NULL;
++}
++
+ uint32_t simcity_recomp_frame_width(const SimCityRecomp *instance) {
+     return instance && instance->widescreen ?
+         SIMCITY_RECOMP_WIDESCREEN_WIDTH : SIMCITY_RECOMP_FRAME_WIDTH;

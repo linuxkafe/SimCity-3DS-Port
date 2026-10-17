@@ -28,6 +28,18 @@ extern int g_dbg_rotate_mode;
 typedef void (*dbgk_state_fn)(char *buf, unsigned capacity);
 void dbgk_set_state_fn(dbgk_state_fn fn);
 
+/* Reset the emulation to cold-boot state. Exists because a determinism test
+   needs two runs that start from the same state: without it, the second run
+   begins wherever the first one stopped, and comparing frames proves nothing.
+   Returns 1 on success. */
+typedef int (*dbgk_reset_fn)(char *err, unsigned capacity);
+void dbgk_set_reset_fn(dbgk_reset_fn fn);
+
+/* The composited frame's SHA-256 as a 64-char hex string, or NULL.
+   Stale unless `cclog 1` is in effect -- see the core header. */
+typedef const char *(*dbgk_hash_fn)(void);
+void dbgk_set_hash_fn(dbgk_hash_fn fn);
+
 /* Host-driven emulation control.
  *
  * g_dbg_pause is -1 when the host is not driving (the application's own
@@ -119,7 +131,7 @@ extern volatile int g_dbg_trace_perframe;
 
 /* build identity, so the host can confirm what is actually running on the
    device instead of assuming the card holds what was last uploaded */
-#define DS3_BUILD_ID "ftp7"
+#define DS3_BUILD_ID "ftp9"
 
 /* Set by the `mode` verb.
    0 = simcity_recomp_advance()          — conversion and render every frame
