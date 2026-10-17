@@ -43,6 +43,16 @@ static int   g_client = -1;
 static FILE  *g_xfer_file = NULL;
 static int   g_xfer_send = 0;      /* 1 = RETR, 0 = STOR */
 static long  g_xfer_left = 0;
+/* Control-channel output is queued, never sent inline. A blocking send() in
+   the main loop is how the app died: a client that stops reading wedges send(),
+   the whole loop stalls, and the 3DS watchdog closes the process. The queue is
+   drained a bounded amount per poll so one slow reader cannot monopolise the
+   frame either. If a client falls far enough behind to fill it, it is dropped —
+   a wedged transfer matters less than a wedged game. */
+#define FTP_OUT_MAX  8192
+static char  g_out[FTP_OUT_MAX];
+static size_t g_out_len = 0;
+
 static char  g_cwd[768] = "sdmc:/";
 static char  g_line[FTP_LINE_MAX];
 static size_t g_line_len = 0;
@@ -50,8 +60,34 @@ static char  g_rbuf[FTP_XFER_CHUNK];
 static int   g_pasv_port = 0;
 static int   g_data_fd = -1;
 
+static void ftp_out(const char *s, size_t n) {
+    if (n > FTP_OUT_MAX - g_out_len) {
+        g_out_len = 0;   /* client is hopelessly behind; drop its output */
+    }
+    memcpy(g_out + g_out_len, s, n);
+    g_out_len += n;
+}
+
 static void ftp_reply(int fd, const char *s) {
-    (void)!send(fd, s, strlen(s), 0);
+    (void)fd;
+    ftp_out(s, strlen(s));
+}
+
+static void ftp_flush(void) {
+    size_t budget = 2048;
+    while (g_out_len > 0 && budget > 0) {
+        ssize_t n = send(g_client, g_out, g_out_len, 0);
+        if (n > 0) {
+            memmove(g_out, g_out + n, g_out_len - (size_t)n);
+            g_out_len -= (size_t)n;
+            budget -= (size_t)n;
+        } else if (n < 0 && (errno == EAGAIN || errno == EWOULDBLOCK || errno == EINTR)) {
+            return;                      /* peer is behind; try again next poll */
+        } else {
+            g_out_len = 0;               /* real error: give up on the output */
+            return;
+        }
+    }
 }
 
 /* ── Path handling ─────────────────────────────────────────────────── */
@@ -59,6 +95,18 @@ static void ftp_reply(int fd, const char *s) {
 /* Build an absolute card path from the current directory plus a client-supplied
  * argument. Rejects anything that could climb out of the card: "..", absolute
  * paths, and NUL. Returns 0 on success. */
+/* The 3DS filesystem service is inconsistent about directory paths: fopen on
+   "sdmc:/3ds/simcity.3dsx" works, while opendir on "sdmc:/3ds" fails. Trying
+   the trailing-slash form first and falling back covers both without having to
+   know which way this particular path happens to round-trip. */
+static DIR *ftp_opendir(const char *path) {
+    char with_slash[800];
+    DIR *d = opendir(path);
+    if (d) return d;
+    snprintf(with_slash, sizeof(with_slash), "%s/", path);
+    return opendir(with_slash);
+}
+
 static int ftp_abspath(const char *arg, char *out, size_t outlen) {
     char tmp[768];
 
@@ -85,7 +133,7 @@ static void ftp_list(int fd) {
     struct dirent *e;
 
     if (ftp_abspath(NULL, path, sizeof(path)) != 0) return;
-    d = opendir(path);
+    d = ftp_opendir(path);
     if (!d) { ftp_reply(fd, "550 no such directory\r\n"); return; }
 
     ftp_reply(fd, "150 listing\r\n");
@@ -101,7 +149,7 @@ static void ftp_list(int fd) {
         snprintf(line, sizeof(line), "%s %8ld %s\r\n",
                  S_ISDIR(st.st_mode) ? "drwxr-xr-x" : "-rw-r--r--",
                  (long)st.st_size, e->d_name);
-        (void)!send(fd, line, strlen(line), 0);
+        ftp_out(line, strlen(line));
     }
     closedir(d);
     ftp_reply(fd, "226 done\r\n");
@@ -128,7 +176,11 @@ static void ftp_open_passive(int fd) {
     memset(&pa, 0, sizeof(pa));
     pa.sin_family = AF_INET;
     pa.sin_addr = addr.sin_addr;
-    pa.sin_port = 0;
+    /* soc:u will not bind port 0 - asking for an ephemeral port fails with
+       "cannot bind data socket", which is exactly what it did. Use a fixed
+       data port just above the control port instead. One client at a time is
+       already the contract, so a fixed port costs nothing. */
+    pa.sin_port = htons((uint16_t)(FTP_PORT + 1));
     if (bind(pfd, (struct sockaddr *)&pa, sizeof(pa)) != 0 || listen(pfd, 1) != 0) {
         close(pfd);
         ftp_reply(fd, "425 cannot bind data socket\r\n");
@@ -189,7 +241,7 @@ static void ftp_exec(int fd, char *cmd, char *arg) {
         if (ftp_abspath(arg, path, sizeof(path)) != 0) {
             ftp_reply(fd, "550 path rejected\r\n");
         } else {
-            DIR *d = opendir(path);
+            DIR *d = ftp_opendir(path);
             if (!d) {
                 ftp_reply(fd, "550 no such directory\r\n");
             } else {
@@ -317,10 +369,13 @@ void ds3ftp_poll(void) {
             fcntl(c, F_SETFL, fcntl(c, F_GETFL, 0) | O_NONBLOCK);
             g_client = c;
             g_line_len = 0;
+            g_out_len = 0;
             ftp_reply(c, "220 SimCity 3DS FTP (sd card)\r\n");
+            ftp_flush();
         }
         return;
     }
+    ftp_flush();
 
     /* A transfer in flight gets the whole poll, so the game still runs between
        chunks instead of the file blocking everything. */
@@ -338,8 +393,23 @@ void ds3ftp_poll(void) {
                 ftp_reply(g_client, "226 transfer complete\r\n");
                 return;
             }
-            send(data_fd, g_rbuf, got, 0);
-            g_xfer_left -= (long)got;
+            ssize_t sent = send(data_fd, g_rbuf, got, 0);
+            if (sent < 0 && (errno == EAGAIN || errno == EWOULDBLOCK || errno == EINTR)) {
+                /* Would block: leave the bytes in the file and retry. Rewinding
+                   is safe because the file offset has not moved past them yet. */
+                fseek(g_xfer_file, -(long)got, SEEK_CUR);
+                return;
+            }
+            if (sent <= 0) {
+                close(data_fd); g_data_fd = -1;
+                fclose(g_xfer_file); g_xfer_file = NULL;
+                ftp_reply(g_client, "426 data connection lost\r\n");
+                return;
+            }
+            if ((size_t)sent < got) {
+                fseek(g_xfer_file, (long)((size_t)got - (size_t)sent), SEEK_CUR);
+            }
+            g_xfer_left -= (long)sent;
         } else {
             ssize_t n = recv(data_fd, g_rbuf, sizeof(g_rbuf), 0);
             if (n < 0 && (errno == EAGAIN || errno == EWOULDBLOCK || errno == EINTR)) {
@@ -387,5 +457,6 @@ void ds3ftp_poll(void) {
 
         ftp_exec(g_client, g_line, arg);
         g_line_len = 0;
+        ftp_flush();
     }
 }

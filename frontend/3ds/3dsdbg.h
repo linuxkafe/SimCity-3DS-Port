@@ -119,7 +119,7 @@ extern volatile int g_dbg_trace_perframe;
 
 /* build identity, so the host can confirm what is actually running on the
    device instead of assuming the card holds what was last uploaded */
-#define DS3_BUILD_ID "d943b801"
+#define DS3_BUILD_ID "ftp2"
 
 /* Set by the `hud` verb. The console redraws the whole bottom framebuffer and
    clears the screen every frame by default, which both costs time and destroys
