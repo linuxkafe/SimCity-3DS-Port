@@ -19,7 +19,75 @@
 #define DS3_ROTATE_MIRROR 1
 #endif
 
-/* ── Helper: convert 32-bit BGRA to 16-bit RGB565 ─────────────────── */
+/* ── Helper: convert the core's 15-bit BGR555 to 16-bit RGB565 ─────── */
+
+/* The core now hands us the composited frame as BGR555 directly
+   (simcity_recomp_frame_bgr555, patches/0003) instead of making us ask for the
+   32-bit buffer and widen it ourselves. Per pixel this is now one 32-entry
+   lookup for green and two masks, where before it was three lookups to build
+   the 32-bit word plus three shifts to narrow it again.
+
+   The naive version of this function -- mask the three fields out of the 555
+   word and pack them into a 565 word -- is wrong on 32736 of 32768 possible
+   inputs, and not by a rounding error. It reproduces the wrong green.
+
+   Why: the obvious reading is that the field at bits [10:5] IS 6-bit green, so
+   it can be copied across. But the code being replaced did not do that. It
+   took the low FIVE bits of that field, widened 5->8 with (v*255)/31, then
+   narrowed 8->6 by >>2. That is not the identity and it is not the identity on
+   purpose: it lands on 63 for full green where copying the field would give 31.
+   The old path was brighter in the greens than a straight field copy, and the
+   picture on the device was calibrated against the old path.
+
+   So the conversion has to reproduce what it replaces, bit for bit, rather than
+   what looks reasonable. widen5[] below is the same table the core uses in
+   bgra(), shifted one bit less; r5 and b5 are exact bit copies because
+   (widen5[v]>>3) == v for all 32 values, which is what makes this cheap. That
+   identity is asserted in tools/check_rgb565_exact.c, along with the full
+   32768-value equivalence against the old path. Both were checked on the host
+   before this reached the card.
+
+   g_dbg_chan_swap stays as the runtime channel-order override. Note the field
+   names below are the DISPLAY's, and they are not the core's: the core's low
+   field ends up in the display's red. That is the measured order, not a typo,
+   and the comment below explains why it was measured instead of assumed. */
+static const uint8_t g_widen5[32] = {
+      0,   8,  16,  24,  32,  41,  49,  57,  65,  74,  82,  90,  98, 106,
+    115, 123, 131, 139, 148, 156, 164, 172, 180, 189, 197, 205, 213, 222,
+    230, 238, 246, 255
+};
+/* g_widen5[v] >> 2: the 5-bit field widened to the display's 6-bit green. */
+static const uint8_t g_widen6[32] = {
+      0,   2,   4,   6,   8,  10,  12,  14,  16,  18,  20,  22,  24,  26,
+     28,  30,  32,  34,  37,  39,  41,  43,  45,  47,  49,  51,  53,  55,
+     57,  59,  61,  63
+};
+
+/* The old path, kept only so tools/check_rgb565_exact.c can prove the new one
+   matches it for every input. Not referenced by the renderer. */
+#if defined(DS3_RGB565_PROOF)
+static inline uint16_t frame_to_rgb565_via_bgra(uint32_t px) {
+    uint8_t r = (uint8_t)(px & 0xFFu);
+    uint8_t g = (uint8_t)((px >> 8) & 0xFFu);
+    uint8_t b = (uint8_t)((px >> 16) & 0xFFu);
+    uint8_t r5 = (uint8_t)((r >> 3) & 0x1Fu);
+    uint8_t g6 = (uint8_t)((g >> 2) & 0x3Fu);
+    uint8_t b5 = (uint8_t)((b >> 3) & 0x1Fu);
+    if (g_dbg_chan_swap) return (uint16_t)((b5 << 11) | (g6 << 5) | r5);
+    return (uint16_t)((r5 << 11) | (g6 << 5) | b5);
+}
+#endif
+
+static inline uint16_t frame_to_rgb565(uint16_t bgr555) {
+    uint8_t lo  = (uint8_t)(bgr555 & 0x1Fu);         /* core's low field   */
+    uint8_t g5  = (uint8_t)((bgr555 >> 5) & 0x1Fu);  /* five bits of green */
+    uint8_t hi  = (uint8_t)((bgr555 >> 10) & 0x1Fu); /* core's high field  */
+    uint8_t r5 = lo, b5 = hi, g6 = g_widen6[g5];
+    if (g_dbg_chan_swap) return (uint16_t)((b5 << 11) | (g6 << 5) | r5);
+    return (uint16_t)((r5 << 11) | (g6 << 5) | b5);
+}
+
+/* ── Historical note: the accessor this replaced ───────────────────── */
 
 /* The core's public accessor is called simcity_recomp_frame_bgra, but the
    pixels it hands out are RGBA: byte 0 is red, byte 2 is blue.
@@ -41,19 +109,8 @@
 
    g_dbg_chan_swap remains as a runtime override so the channel order can be
    re-checked from the host without a rebuild; it now defaults to 0 because the
-   order below is the measured one. */
-static inline uint16_t frame_to_rgb565(uint32_t px) {
-    uint8_t r = (uint8_t)(px & 0xFFu);          /* NOT blue, despite the name */
-    uint8_t g = (uint8_t)((px >> 8) & 0xFFu);
-    uint8_t b = (uint8_t)((px >> 16) & 0xFFu);  /* NOT red */
-    uint8_t r5 = (r >> 3) & 0x1Fu;
-    uint8_t g6 = (g >> 2) & 0x3Fu;
-    uint8_t b5 = (b >> 3) & 0x1Fu;
-    if (g_dbg_chan_swap) {
-        return (uint16_t)((b5 << 11) | (g6 << 5) | r5);
-    }
-    return (uint16_t)((r5 << 11) | (g6 << 5) | b5);
-}
+   order below is the measured one. That override is now carried by
+   frame_to_rgb565() above, which is the only caller that needs it. */
 
 /* ── Global framebuffer pointers ──────────────────────────────────── */
 
@@ -81,7 +138,7 @@ void ds3_render_exit(void) {
 
 /* -- ds3_render_frame() ----------------------------------------------- */
 
-void ds3_render_frame(const uint32_t *src,
+void ds3_render_frame(const uint16_t *src,
                       unsigned src_width,
                       unsigned src_height,
                       unsigned crop_top,
@@ -110,7 +167,7 @@ void ds3_render_frame(const uint32_t *src,
                         ? (src_width - crop_left - crop_right) : 0u;
     if (rows == 0u || row_pixels == 0u) return;
 
-    const uint32_t *row_src = src + (size_t)crop_top * src_width + crop_left;
+    const uint16_t *row_src = src + (size_t)crop_top * src_width + crop_left;
 
     /* After transposition the destination footprint is
        height = source width, width = source height. Fit it in the frame. */
@@ -171,7 +228,7 @@ void ds3_render_frame(const uint32_t *src,
             unsigned sx = dy;
             if (sy >= rows)   sy = rows - 1u;
             if (sx >= row_pixels) sx = row_pixels - 1u;
-            uint32_t pixel = row_src[(size_t)sy * row_pixels + sx];
+            uint16_t pixel = row_src[(size_t)sy * row_pixels + sx];
             g_top_fb[(size_t)(off_y + dy) * fb_w + (off_x + dx)] =
                 frame_to_rgb565(pixel);
         }

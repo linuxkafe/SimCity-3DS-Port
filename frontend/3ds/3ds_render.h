@@ -31,7 +31,7 @@ void ds3_render_exit(void);
  * crop_left, crop_right: horizontal margin to crop on each side (for aspect
  *                        ratio correction; 0 for pixel-perfect).
  */
-void ds3_render_frame(const uint32_t *src,
+void ds3_render_frame(const uint16_t *src,
                       unsigned src_width,
                       unsigned src_height,
                       unsigned crop_top,

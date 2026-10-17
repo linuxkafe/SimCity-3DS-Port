@@ -303,8 +303,13 @@ SimCityRecompFrameResult ds3_advance_frame(void) {
         }
     }
 
-    /* Render the current frame */
-    const uint32_t *frame = simcity_recomp_frame_bgra(g_recomp);
+    /* Render the current frame.
+       frame_bgr555, not frame_bgra: the core already composited this frame in
+       15-bit BGR555 (patches/0003), so asking for the 32-bit buffer only to
+       narrow it again was a second pass over every pixel to throw away the
+       widening. The conversion in ds3_render_frame is bit-identical to the one
+       it replaces -- see the proof in tools/check_rgb565_exact.c. */
+    const uint16_t *frame = simcity_recomp_frame_bgr555(g_recomp);
     unsigned fw = simcity_recomp_frame_width(g_recomp);
     unsigned fh = SIMCITY_RECOMP_FRAME_HEIGHT;
 

@@ -1,0 +1,62 @@
+Subject: [PATCH] core: expose the composited frame as BGR555
+
+render_lines_impl() already writes every pixel in the SNES CGRAM form
+(BGR555, 5/6/5) in the same pass over the composited image, alongside the
+32-bit buffer - it uses out555 for its own report SHA. The public API only
+exposed the 32-bit buffer.
+
+That is why the 3DS port was paying twice for colour: it asked the core for
+BGRA, and then converted BGRA to RGB565 itself, over 61184 pixels, every
+frame. The core had already computed the closer format and thrown it away
+behind a private pointer.
+
+Named bgr555, not rgb565: it is 15 bits, 5/6/5. The host still has to
+widen green to 6 bits, and that widening is not the identity. This file
+already has one accessor whose name lies about its layout; do not add a second.
+
+This adds a read-only accessor for that buffer. It is not a conversion and
+costs nothing to populate - the data is already there. A host that wants
+RGB565 can now skip the 8-bit widening pass entirely and convert in one step.
+
+Hosts that want BGRA are unaffected; frame_bgra() and the 32-bit buffer are
+unchanged, and the bgra() table patch still applies.
+
+Measured alongside this: replacing the integer divides in bgra() with an exact
+32-entry table cut the advance phase from 192.5M to 146.8M ticks per frame
+(-23.7%) with bit-identical output. See patches/0002.
+
+--- a/include/simcity_static_recomp.h	2026-10-17 13:14:26.909485044 +0100
++++ b/include/simcity_static_recomp.h	2026-10-17 13:14:26.979485978 +0100
+@@ -155,6 +155,19 @@
+                                         size_t error_capacity);
+ 
+ const uint32_t *simcity_recomp_frame_bgra(const SimCityRecomp *instance);
++
++/* The composited frame as 16-bit BGR555 — the exact 15-bit-per-channel form
++   the SNES stores in CGRAM, and the closest match to what a 5/6/5 display
++   expects.
++
++   This is not a conversion. render_lines_impl() already writes every pixel in
++   this form, in the same pass, for its own internal report SHA. Exposing it
++   lets a host that wants RGB565 skip the 32-bit buffer and the widening to
++   8 bits per channel entirely, instead of asking for BGRA and then narrowing
++   it again — which is what the 3DS port was doing.
++
++   Read-only, like frame_bgra. Valid until the next advance. */
++const uint16_t *simcity_recomp_frame_bgr555(const SimCityRecomp *instance);
+ uint32_t simcity_recomp_frame_width(const SimCityRecomp *instance);
+ int simcity_recomp_widescreen_enabled(const SimCityRecomp *instance);
+ int simcity_recomp_set_widescreen(SimCityRecomp *instance, int enabled,
+--- a/src/simcity_static_recomp.c	2026-10-17 13:14:26.905484990 +0100
++++ b/src/simcity_static_recomp.c	2026-10-17 13:14:26.980485992 +0100
+@@ -1090,6 +1090,10 @@
+     return instance ? instance->bgra : NULL;
+ }
+ 
++const uint16_t *simcity_recomp_frame_bgr555(const SimCityRecomp *instance) {
++    return instance ? instance->bgr555 : NULL;
++}
++
+ uint32_t simcity_recomp_frame_width(const SimCityRecomp *instance) {
+     return instance && instance->widescreen ?
+         SIMCITY_RECOMP_WIDESCREEN_WIDTH : SIMCITY_RECOMP_FRAME_WIDTH;
