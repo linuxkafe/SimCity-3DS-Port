@@ -254,8 +254,16 @@ SimCityRecompFrameResult ds3_advance_frame(void) {
 
     if (g_trace_perframe)
         ds3_trace("[T5] advance_frame: entering simcity_recomp_advance");
-    /* Advance one SNES frame */
-    int rc = simcity_recomp_advance(g_recomp, input, 1u, &result);
+    /* Advance one SNES frame.
+     *
+     * mode 1 defers the expensive host frame conversion to
+     * simcity_recomp_render_current_frame(), which the core exposes precisely
+     * for hosts that do not need every frame converted. Everything else —
+     * CPU, PPU timing, S-SMP, S-DSP, controller history — advances identically,
+     * so the A/B is sound and only the conversion moves. */
+    int rc = (g_dbg_advance_mode == 1)
+           ? simcity_recomp_advance_headless(g_recomp, input, 1u, &result)
+           : simcity_recomp_advance(g_recomp, input, 1u, &result);
     if (g_trace_perframe)
         ds3_trace("[T5] simcity_recomp_advance returned rc=%d", rc);
     g_dbg_phase_us[DBGK_PHASE_CORE] =
@@ -284,6 +292,14 @@ SimCityRecompFrameResult ds3_advance_frame(void) {
             pos = (g_audio_write_pos + 1) % AUDIO_RING_SIZE;
             g_audio_ring[pos] = (i + 1 < n) ? chunk[i + 1] : 0;
             g_audio_write_pos += 2;
+        }
+    }
+
+    /* In headless mode the frame has not been converted yet. */
+    if (g_dbg_advance_mode == 1) {
+        char rerr[128];
+        if (simcity_recomp_render_current_frame(g_recomp, rerr, sizeof(rerr)) != 1) {
+            ds3_trace("[T7] render_current_frame failed: %s", rerr);
         }
     }
 
@@ -349,11 +365,11 @@ static void ds3_dbg_state(char *buf, unsigned capacity) {
     snprintf(buf, capacity,
              "frame=%u src=%p src_w=%u src_h=%u instructions=%llu master=%llu "
              "input=0x%04X injected=0x%04X chan=%d rot=%d "
-             "build=" DS3_BUILD_ID " hud=%d adv=%u core=%u render=%u hudus=%u "
+             "build=" DS3_BUILD_ID " mode=%d hud=%d adv=%u core=%u render=%u hudus=%u "
              "audio=%u dbg=%u present=%u loop=%u ftp=%d last_error=%s",
              frame, src, fw, fh, instr, master,
              (unsigned)g_last_input, (unsigned)g_dbg_input,
-             g_dbg_chan_swap, g_dbg_rotate_mode, g_dbg_hud,
+             g_dbg_chan_swap, g_dbg_rotate_mode, g_dbg_advance_mode, g_dbg_hud,
              (unsigned)g_dbg_phase_us[DBGK_PHASE_ADVANCE],
              (unsigned)g_dbg_phase_us[DBGK_PHASE_CORE],
              (unsigned)g_dbg_phase_us[DBGK_PHASE_RENDER],

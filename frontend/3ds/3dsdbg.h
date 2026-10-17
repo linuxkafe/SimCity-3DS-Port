@@ -119,7 +119,19 @@ extern volatile int g_dbg_trace_perframe;
 
 /* build identity, so the host can confirm what is actually running on the
    device instead of assuming the card holds what was last uploaded */
-#define DS3_BUILD_ID "ftp2"
+#define DS3_BUILD_ID "mode1"
+
+/* Set by the `mode` verb.
+   0 = simcity_recomp_advance()          — conversion and render every frame
+   1 = simcity_recomp_advance_headless() + simcity_recomp_render_current_frame()
+       The core documents advance_headless as advancing every guest subsystem
+       identically but deferring "the expensive host frame conversion". On the
+       3DS the advance phase is 91% of the main loop while the counter reports
+       only ~12k guest instructions, so the cost is in host-side work that the
+       instruction count does not cover — PPU and the emulated S-DSP. This
+       switch separates "conversion per frame" from "everything else" without
+       guessing. */
+extern volatile int g_dbg_advance_mode;
 
 /* Set by the `hud` verb. The console redraws the whole bottom framebuffer and
    clears the screen every frame by default, which both costs time and destroys

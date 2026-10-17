@@ -21,17 +21,34 @@
 
 /* ── Helper: convert 32-bit BGRA to 16-bit RGB565 ─────────────────── */
 
-static inline uint16_t bgra_to_rgb565(uint32_t bgra) {
-    uint8_t b = (uint8_t)(bgra & 0xFFu);
-    uint8_t g = (uint8_t)((bgra >> 8) & 0xFFu);
-    uint8_t r = (uint8_t)((bgra >> 16) & 0xFFu);
-    uint8_t r5  = (r >> 3) & 0x1Fu;
-    uint8_t g6  = (g >> 2) & 0x3Fu;
-    uint8_t b5  = (b >> 3) & 0x1Fu;
-    /* Red and blue are exchanged when the debug port says the panel wants it.
-       See g_dbg_chan_swap. The pixel data written here is verified correct in
-       RAM either way; only the order of the two outer fields is in question,
-       and it is not answerable from source — only from the panel. */
+/* The core's public accessor is called simcity_recomp_frame_bgra, but the
+   pixels it hands out are RGBA: byte 0 is red, byte 2 is blue.
+
+   That was measured on the device, not assumed. Reading the buffer as the name
+   says produced a title screen with the SimCity logo's "Sim" in blue and "City"
+   in red; the real logo is the other way round. Decoding by region rather than
+   by exact colour value:
+
+       before:  "Sim" region   R= 8.4  B=21.5   -> blue    (wrong)
+       after:   "Sim" region   R=13.8  B=10.7   -> red     (right)
+
+   The first attempt to catch this went wrong in a way worth recording: I
+   asserted the logo was "Sim blue, City red" without checking, then used that
+   assumption to decode the capture AND to validate the conversion. Both sides
+   agreed, so the test could not fail. A check built on an unverified premise
+   confirms the premise. The operator's original observation was the correct
+   evidence from the start.
+
+   g_dbg_chan_swap remains as a runtime override so the channel order can be
+   re-checked from the host without a rebuild; it now defaults to 0 because the
+   order below is the measured one. */
+static inline uint16_t frame_to_rgb565(uint32_t px) {
+    uint8_t r = (uint8_t)(px & 0xFFu);          /* NOT blue, despite the name */
+    uint8_t g = (uint8_t)((px >> 8) & 0xFFu);
+    uint8_t b = (uint8_t)((px >> 16) & 0xFFu);  /* NOT red */
+    uint8_t r5 = (r >> 3) & 0x1Fu;
+    uint8_t g6 = (g >> 2) & 0x3Fu;
+    uint8_t b5 = (b >> 3) & 0x1Fu;
     if (g_dbg_chan_swap) {
         return (uint16_t)((b5 << 11) | (g6 << 5) | r5);
     }
@@ -156,7 +173,7 @@ void ds3_render_frame(const uint32_t *src,
             if (sx >= row_pixels) sx = row_pixels - 1u;
             uint32_t pixel = row_src[(size_t)sy * row_pixels + sx];
             g_top_fb[(size_t)(off_y + dy) * fb_w + (off_x + dx)] =
-                bgra_to_rgb565(pixel);
+                frame_to_rgb565(pixel);
         }
     }
 

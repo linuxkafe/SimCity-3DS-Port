@@ -410,6 +410,7 @@ volatile int g_dbg_chan_swap = 0;
 volatile int g_dbg_quit = 0;
 volatile int g_dbg_trace_perframe = 0;
 volatile int g_dbg_hud = 1;
+volatile int g_dbg_advance_mode = 0;
 
 /* FTP listener state, reported through `info` so a failed bind is visible over
    the debug port instead of only on a console that gets cleared every frame. */
@@ -470,6 +471,14 @@ static void dbgk_ext(const char *line) {
         char m[32];
         snprintf(m, sizeof(m), "OK rot=%d\n", mode);
         dbgk_send_str(m);
+    } else if (!strcmp(verb, "mode")) {
+        int m = 0;
+        if (sscanf(line, "%*s %d", &m) != 1) { dbgk_send_str("ERR args\n"); return; }
+        if (m < 0 || m > 1) { dbgk_send_str("ERR range (0 or 1)\n"); return; }
+        g_dbg_advance_mode = m;
+        char r[64];
+        snprintf(r, sizeof(r), "OK mode=%d\n", m);
+        dbgk_send_str(r);
     } else if (!strcmp(verb, "hud")) {
         int on = 1;
         if (sscanf(line, "%*s %d", &on) != 1) { dbgk_send_str("ERR args\n"); return; }
