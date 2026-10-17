@@ -479,7 +479,7 @@ static void dbgk_ext(const char *line) {
                  "OK 3dsdbgkit/2 build=%s breaks=%d ftp_listen=%d ftp_errno=%d cclog=%d anlz=%d\n",
                  DS3_BUILD_ID, g_break_count, g_ftp_listen_fd, g_ftp_last_error,
                  sc_core_logging_enabled() ? 1 : 0,
-                 sc_core_get_skip_analyze() ? 1 : 0);
+                 sc_core_get_skip_analyze() ? 0 : 1);
         dbgk_send_str(m);
     } else if (!strcmp(verb, "state")) {
         if (!g_state_fn) { dbgk_send_str("ERR nostate\n"); return; }

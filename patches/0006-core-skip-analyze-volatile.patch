@@ -1,0 +1,25 @@
+Subject: [PATCH] core: make the analyze() switch volatile
+
+sc_core_skip_analyze is a global written by the `anlz` debug verb and read by
+`state`, which the measurement harness uses to verify the flag actually
+changed before sampling. Without volatile the compiler is free to cache the
+read, so the harness can see a stale value and discard the pair -- or worse,
+proceed on a value that does not reflect the toggle.
+
+The first harness run against the analyze() switch discarded all 16 pairs on
+"flag did not switch", which is this bug surfacing rather than a real failure.
+A harness that cannot confirm its own precondition is worse than no harness:
+it produces an exit code and no number.
+
+Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>
+--- a/src/simcity_static_recomp.c
++++ b/src/simcity_static_recomp.c
+@@ -101,7 +101,7 @@
+     return g_core_log != NULL;
+ }
+ 
+-int sc_core_skip_analyze = 0;
++volatile int sc_core_skip_analyze = 0;
+ void sc_core_set_skip_analyze(int skip) { sc_core_skip_analyze = skip ? 1 : 0; }
+ int sc_core_get_skip_analyze(void) { return sc_core_skip_analyze; }
+ 
