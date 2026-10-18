@@ -142,6 +142,15 @@ This was verified rather than assumed — emulators are commonly expected *not*
 to provide guest networking, and the whole harness design depended on the
 answer.
 
+**Known defect on this target: the debug bridge can wedge.** When a client
+disappears without a clean close, the bridge can hold its single-client slot
+indefinitely and stop answering, while the port still appears to `LISTEN` — so
+a reachability check passes and the real symptom is silence. A `poll(POLLHUP)`
+reap was attempted (`8e8b8b9`) and **did not resolve it**; that claim is
+retracted. Short interactive sessions are unaffected. Long automated sessions
+are not, and this is the one thing standing between the project and a reliable
+CI gate.
+
 One important limit: **tick counts in an emulator are not the same clock as
 tick counts on hardware.** They are useful for functional tests and for effects
 well above the noise, and misleading for small ones. `deck_ab.py` reports

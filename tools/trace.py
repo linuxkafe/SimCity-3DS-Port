@@ -44,24 +44,77 @@ SCRIPT = [
 
 
 class Bridge:
-    def __init__(self, host, port, timeout=40, settle=2.2):
+    """One connection to the debug bridge, held open across commands.
+
+    The bridge serves ONE client at a time and there is no idle timeout, so a
+    single socket can carry the whole run.
+
+    This exists because the previous transport opened a fresh connection per
+    command -- roughly 250 sockets per gate phase. That provoked the symptom
+    documented in T034: the emulator survived two phases and was SIGKILLed
+    during the third. Whether socket count is the cause was never proven, only
+    correlated, so this is the cheap change that tests the correlation. If the
+    SIGKILL persists with one socket, the cause is something else and this
+    has bought clarity rather than a fix.
+
+    The socket is re-established transparently on any send or receive failure,
+    so a dropped connection is an event the report shows, not a silent skip.
+    """
+    def __init__(self, host, port, timeout=40, settle=0.45):
         self.host, self.port = host, port
         self.timeout, self.settle = timeout, settle
+        self._sock = None
+        self._fh = None
+        self.reconnects = 0
 
-    def cmd(self, line):
-        time.sleep(self.settle)
-        s = socket.create_connection((self.host, self.port), timeout=self.timeout)
-        s.settimeout(self.timeout)
-        try:
-            f = s.makefile("rwb")
-            f.write((line + "\n").encode())
-            f.flush()
-            return f.readline().decode().strip()
-        finally:
+    def _connect(self):
+        self.close()
+        self._sock = socket.create_connection((self.host, self.port),
+                                              timeout=self.timeout)
+        self._sock.settimeout(self.timeout)
+        self._fh = self._sock.makefile("rwb")
+
+    def close(self):
+        if self._fh is not None:
             try:
-                s.close()
+                self._fh.close()
             except OSError:
                 pass
+            self._fh = None
+        if self._sock is not None:
+            try:
+                self._sock.close()
+            except OSError:
+                pass
+            self._sock = None
+
+    def cmd(self, line, retries=3):
+        """Send a command on the held connection and read one line.
+
+        A single socket for the whole run. The bridge is single-client and has
+        no idle timeout, so holding it open is safe; the settle delay that
+        existed per command is no longer needed for politeness, but is kept
+        because the bridge is serviced from the emulated main loop and a
+        command issued mid-frame is answered a frame later.
+        """
+        last = None
+        for attempt in range(retries):
+            try:
+                if self._fh is None:
+                    self._connect()
+                    self.reconnects += 1
+                time.sleep(self.settle)
+                self._fh.write((line + "\n").encode())
+                self._fh.flush()
+                reply = self._fh.readline()
+                if not reply:
+                    raise OSError("bridge closed the connection")
+                return reply.decode().strip()
+            except (socket.timeout, ConnectionError, OSError) as exc:
+                last = exc
+                self.close()
+                time.sleep(1.0 * (attempt + 1))
+        raise RuntimeError(f"cmd {line!r} failed after {retries} retries: {last}")
 
 
 def frame_no(b):
@@ -120,23 +173,17 @@ def flat_script(n):
 def record(b, frames, out, warmup=0):
     info = b.cmd("info")
     print("info: %s" % info)
-    # Probe the verb rather than sniffing the `info` format string. The first
-    # version looked for "fh=" in info and refused to run, because the prefix
-    # was added to `state` and not to `info`. Sniffing a human-readable status
-    # line is brittle in a way that calling the command is not.
-    probe = b.cmd("hash")
-    if not probe.startswith("OK "):
-        print("  ! this build has no working `hash` verb: %s" % probe)
-        return None
-
-    # The digest only moves while the core log is open. Without this the whole
-    # run would compare one stale value against itself.
+    # Turn the core log on FIRST. The hash verb returns an empty digest while
+    # logging is off, because render_lines_impl only recomputes it behind
+    # sc_core_logging_enabled(). Probing before enabling means every build
+    # looks broken, since the response is "OK " with nothing after it.
     ack = b.cmd("cclog 1")
     print("cclog: %s" % ack)
     if not ack.startswith("OK"):
         print("  ! could not open the core log; the digest would be stale")
         return None
-
+    # The digest only moves while the core log is open. Without this the whole
+    # run would compare one stale value against itself.
     print("pause : %s" % b.cmd("pause"))
     print("reset : %s" % b.cmd("reset"))
 
