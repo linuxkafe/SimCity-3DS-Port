@@ -94,6 +94,20 @@ static volatile unsigned long g_st_reap_hits;
 static volatile int           g_st_sock_error;    /* SO_ERROR of current client */
 static volatile int           g_st_last_poll_rv;  /* poll() return, -99 if not run */
 
+/* Periodic dump of the counters to the emulated SD card.
+ *
+ * The counters are unreachable: pollstat is a verb on the bridge, and the
+ * bridge is the thing that will not answer. ds3_trace already writes to sdmc:
+ * without any network, so the counters go the same way. The host reads the
+ * file from the Deck's SD image and never touches port 5002.
+ *
+ * Interval is in dbg_poll() calls, not wall time -- a frame takes a variable
+ * number of polls and the point is to sample evenly, not quickly. 3000 polls
+ * is a few seconds of running and costs one fopen per interval. */
+static volatile unsigned long g_st_dumps;
+#define DBGK_POLLSTAT_DUMP_EVERY 30u
+#define DBGK_POLLSTAT_PATH "sdmc:/pollstat.log"
+
 /* soc:u socket context. On the 3DS the BSD sockets in libctru are served by
    the SOC service, which needs a caller-supplied context buffer and an
    explicit socInit() before socket() will do anything. Without it socket()
@@ -1000,8 +1014,35 @@ void dbgk_exit(void) {
     }
 }
 
+/* Write the pollstat counters to the SD card.
+ *
+ * Opens, writes one complete line-set, and closes, so the host never reads a
+ * half-written file. Not pretty -- a diagnostic that cannot be read is worse
+ * than a slow one. */
+static void dbgk_pollstat_dump(void) {
+    g_st_dumps++;
+    FILE *f = fopen(DBGK_POLLSTAT_PATH, "w");
+    if (!f) return;
+    fprintf(f,
+            "# dump=%lu uptime_calls=%lu\n"
+            "calls=%lu accepts=%lu afail=%lu aerr=%d feeds=%lu rbytes=%lu\n"
+            "rerr=%d reap=%lu soerr=%d polln=%d hasclient=%d\n",
+            g_st_dumps, g_st_calls,
+            g_st_calls, g_st_accepts, g_st_accept_fails, g_st_accept_err,
+            g_st_feeds, g_st_recv_bytes, g_st_recv_err, g_st_reap_hits,
+            g_st_sock_error, g_st_last_poll_rv,
+            g_client_fd >= 0 ? 1 : 0);
+    fclose(f);
+}
+
 void dbgk_poll(void) {
     g_st_calls++;
+    /* Dump on the first poll as well, so the file's mere existence proves
+       dbgk_poll() ran at all. With an interval-only dump, "no file" is
+       ambiguous between "never called" and "called too few times" -- and that
+       ambiguity is exactly what this instrumentation was built to remove. */
+    if (g_st_calls == 1u || (g_st_calls % DBGK_POLLSTAT_DUMP_EVERY) == 0)
+        dbgk_pollstat_dump();
     if (g_listen_fd < 0) return;
 
     /* Reap a dead client before trying to accept a new one.
