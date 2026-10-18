@@ -51,6 +51,7 @@ extern void sc_core_set_skip_analyze(int skip);
 #include <errno.h>
 #include <sys/types.h>
 #include <sys/socket.h>
+#include <poll.h>
 #include <netinet/in.h>
 #include <arpa/inet.h>
 #include <malloc.h>
@@ -961,6 +962,32 @@ void dbgk_exit(void) {
 void dbgk_poll(void) {
     if (g_listen_fd < 0) return;
 
+    /* Reap a dead client before trying to accept a new one.
+     *
+     * A non-blocking recv() on a socket whose peer has gone can return EAGAIN
+     * indefinitely: the OS clears the RST silently when there is no pending
+     * data, so recv never reports an error. The previous version therefore
+     * held g_client_fd forever once the peer vanished, and no new connection
+     * was ever accepted -- the port kept LISTENing but the bridge was silent.
+     * That is the failure this function exists to prevent.
+     *
+     * poll() with POLLHUP/POLLERR detects the dead peer regardless of whether
+     * recv() would have noticed. POLLHUP means the peer sent FIN or closed;
+     * POLLERR means RST or an error. Either way the slot must be freed.
+     */
+    if (g_client_fd >= 0) {
+        struct pollfd pfd = { g_client_fd, POLLIN | POLLHUP | POLLERR | POLLNVAL, 0 };
+        int r = poll(&pfd, 1, 0);
+        if (r > 0 && (pfd.revents & (POLLHUP | POLLERR | POLLNVAL))) {
+            /* Peer is gone: free the slot immediately. */
+            close(g_client_fd);
+            g_client_fd = -1;
+            g_rsp_rx_len = 0;
+            g_ext_used   = 0;
+            return;
+        }
+    }
+
     if (g_client_fd < 0) {
         int c = accept(g_listen_fd, NULL, NULL);
         if (c >= 0) {
@@ -978,14 +1005,6 @@ void dbgk_poll(void) {
 
     char tmp[512];
     ssize_t n = recv(g_client_fd, tmp, sizeof(tmp), 0);
-    /* A non-blocking recv with nothing to read returns -1/EAGAIN. That is not a
-       disconnect, and treating it as one kills every connection before the peer
-       can send anything. Only a clean EOF (n == 0) or a real error closes.
-
-       The previous version here tested n <= 0, which conflated the two: the
-       FTP and debug ports both accepted a client, greeted it, and dropped it on
-       the very next poll. The n == 0 check alone was closer to right but still
-       leaked the socket when a peer vanished with an error. */
     if (n == 0) {
         close(g_client_fd);
         g_client_fd = -1;
