@@ -72,6 +72,28 @@ int g_dbg_rotate_mode = -1;
 static int g_listen_fd = -1;
 static int g_client_fd = -1;
 
+/* Instrumentation for dbgk_poll(). Counters only -- no control flow in
+   dbgk_poll() is altered by this, and none of these are consulted when
+   deciding anything.
+ *
+ * The reason: on the emulated target the bridge is born wedged. A fresh
+   emulator answers no command, accept() may or may not be running, and every
+   hypothesis so far (abandoned transfers, socket churn, a reap that does not
+   fire) has been about clients. None of them is observable from outside the
+   function. These counters make dbgk_poll()'s actual behaviour visible through
+   `pollstat`, so the next question is answered by data rather than by
+   another speculative change. */
+static volatile unsigned long g_st_calls;
+static volatile unsigned long g_st_accepts;
+static volatile int           g_st_accept_err;   /* errno of last failed accept */
+static volatile unsigned long g_st_accept_fails;
+static volatile unsigned long g_st_feeds;
+static volatile unsigned long g_st_recv_bytes;
+static volatile int           g_st_recv_err;      /* errno of last failed recv */
+static volatile unsigned long g_st_reap_hits;
+static volatile int           g_st_sock_error;    /* SO_ERROR of current client */
+static volatile int           g_st_last_poll_rv;  /* poll() return, -99 if not run */
+
 /* soc:u socket context. On the 3DS the BSD sockets in libctru are served by
    the SOC service, which needs a caller-supplied context buffer and an
    explicit socInit() before socket() will do anything. Without it socket()
@@ -663,6 +685,25 @@ static void dbgk_ext(const char *line) {
     } else if (!strcmp(verb, "run")) {
         g_dbg_pause = 0;
         dbgk_send_str("OK running\n");
+    } else if (!strcmp(verb, "pollstat")) {
+        /* What dbgk_poll() has actually been doing, as opposed to what it
+           looks like it should be doing.
+
+           calls==0      -> the main loop never calls dbg_poll(); everything
+                            else on this line is then irrelevant.
+           accepts>0     -> the slot HAS been filled at some point.
+           sock_error!=0 -> the slot is held by a peer that has gone.
+           reap          -> the POLLHUP path actually fired.
+           aerr          -> why accept() kept failing when it did. */
+        char m[320];
+        snprintf(m, sizeof(m),
+                 "OK calls=%lu accepts=%lu afail=%lu aerr=%d feeds=%lu "
+                 "rbytes=%lu rerr=%d reap=%lu soerr=%d polln=%d hasclient=%d",
+                 g_st_calls, g_st_accepts, g_st_accept_fails, g_st_accept_err,
+                 g_st_feeds, g_st_recv_bytes, g_st_recv_err, g_st_reap_hits,
+                 g_st_sock_error, g_st_last_poll_rv,
+                 g_client_fd >= 0 ? 1 : 0);
+        dbgk_send_str(m);
     } else if (!strcmp(verb, "hash")) {
         /* The composited frame's SHA-256, as 64 hex chars.
            Requires `cclog 1`: with the core log closed nothing recomputes the
@@ -960,6 +1001,7 @@ void dbgk_exit(void) {
 }
 
 void dbgk_poll(void) {
+    g_st_calls++;
     if (g_listen_fd < 0) return;
 
     /* Reap a dead client before trying to accept a new one.
@@ -978,10 +1020,25 @@ void dbgk_poll(void) {
     if (g_client_fd >= 0) {
         struct pollfd pfd = { g_client_fd, POLLIN | POLLHUP | POLLERR | POLLNVAL, 0 };
         int r = poll(&pfd, 1, 0);
+        g_st_last_poll_rv = r;
+        /* Read SO_ERROR directly. A slot held by a departed peer typically has
+           a non-zero SO_ERROR, which distinguishes "occupied by a dead peer"
+           from "occupied by a live peer" -- the difference between two
+           completely different diagnoses, and not visible from revents alone. */
+        {
+            int soerr = 0;
+            socklen_t sl = sizeof(soerr);
+            if (getsockopt(g_client_fd, SOL_SOCKET, SO_ERROR, &soerr, &sl) == 0)
+                g_st_sock_error = soerr;
+            else
+                g_st_sock_error = -errno;
+        }
         if (r > 0 && (pfd.revents & (POLLHUP | POLLERR | POLLNVAL))) {
             /* Peer is gone: free the slot immediately. */
+            g_st_reap_hits++;
             close(g_client_fd);
             g_client_fd = -1;
+            g_st_sock_error = 0;
             g_rsp_rx_len = 0;
             g_ext_used   = 0;
             return;
@@ -990,7 +1047,9 @@ void dbgk_poll(void) {
 
     if (g_client_fd < 0) {
         int c = accept(g_listen_fd, NULL, NULL);
+        if (c < 0) { g_st_accept_fails++; g_st_accept_err = errno; }
         if (c >= 0) {
+            g_st_accepts++;
             fcntl(c, F_SETFL, fcntl(c, F_GETFL, 0) | O_NONBLOCK);
             g_client_fd = c;
             g_rsp_rx_len = 0;
@@ -1003,14 +1062,17 @@ void dbgk_poll(void) {
     }
     if (g_client_fd < 0) return;
 
+    g_st_feeds++;
     char tmp[512];
     ssize_t n = recv(g_client_fd, tmp, sizeof(tmp), 0);
+    if (n > 0) g_st_recv_bytes += (unsigned long)n;
     if (n == 0) {
         close(g_client_fd);
         g_client_fd = -1;
         return;
     }
     if (n < 0) {
+        g_st_recv_err = errno;
         if (errno == EAGAIN || errno == EWOULDBLOCK || errno == EINTR) return;
         close(g_client_fd);
         g_client_fd = -1;
