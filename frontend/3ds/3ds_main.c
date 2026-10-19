@@ -113,6 +113,32 @@ static void ds3_trace(const char *fmt, ...) {
 
 /* Audio: core outputs 32040 Hz stereo; CSND plays at native rate. */
 
+/* ── Phase timing ─────────────────────────────────────────────────── */
+
+/* svcGetSystemTick() counts at the ARM11 clock, 26827953 Hz -- 26.83 ticks per
+ * microsecond, NOT one tick per microsecond. The array this feeds has always
+ * been called g_dbg_phase_us[], which is a claim about units that was false:
+ * it stored raw tick deltas under a name that says microseconds.
+ *
+ * That is not a naming quibble. A reader who trusts the name reads
+ * loop=138000000 and concludes 138 seconds per frame; the true figure is
+ * 0.514 s. This exact confusion cost this session a full round of "why is a
+ * frame taking two minutes" before the discrepancy with observed fps was
+ * chased down. The hardware run that settled it read loop=138910548 ticks at
+ * 268.28 MHz -- 1.94 fps, matching what the screen showed.
+ *
+ * Converted at the point of measurement, once, so every reader downstream --
+ * `prof`, `state`, any future harness -- gets the same units the name claims.
+ * Eight 64-bit multiply-divides per frame is not a cost worth discussing.
+ *
+ * The result is deliberately kept in uint32: the longest frame observed is
+ * ~20 s, five orders of magnitude below the wrap point. */
+#define DS3_TICK_HZ 26827953ull
+
+static uint32_t ds3_ticks_to_us(uint64_t ticks) {
+    return (uint32_t)((ticks * 1000000ull) / DS3_TICK_HZ);
+}
+
 /* ── State ─────────────────────────────────────────────────────────── */
 
 SimCityRecomp *g_recomp = NULL;
@@ -133,6 +159,18 @@ int g_sp_valid = 0;
 int16_t g_audio_ring[AUDIO_RING_SIZE];
 size_t  g_audio_write_pos = 0;
 size_t  g_audio_read_pos  = 0;
+
+/* Profiling / satellite mode state */
+volatile int g_profiling_mode = 0;        /* 0=normal, 1=profile, 2=satellite */
+volatile int g_frame_limit = 0;           /* 0 = unlimited, N = max frames */
+volatile int g_frame_count = 0;           /* frames advanced this session */
+volatile int g_headless_mode = 0;         /* 1 = skip render/audio for profiling */
+
+/* Satellite / failsafe debug state */
+volatile int g_satellite_mode = 0;       /* 1 = offline logging only, no TCP */
+volatile int g_debug_transport = 0;      /* 0=TCP, 1=UDP, 2=file, 3=multi */
+volatile uint32_t g_last_heartbeat = 0;  /* last successful heartbeat */
+volatile int g_connection_lost = 0;      /* 1 = connection lost, needs reconnect */
 
 /* ── Core init / shutdown ─────────────────────────────────────────── */
 
@@ -282,7 +320,7 @@ SimCityRecompFrameResult ds3_advance_frame(void) {
     if (g_trace_perframe)
         ds3_trace("[T5] simcity_recomp_advance returned rc=%d", rc);
     g_dbg_phase_us[DBGK_PHASE_CORE] =
-        (uint32_t)(svcGetSystemTick() - t_core);
+        ds3_ticks_to_us(svcGetSystemTick() - t_core);
     uint64_t t_render = svcGetSystemTick();
     if (rc != 1) {
         snprintf(result.renderer_error, sizeof(result.renderer_error),
@@ -328,15 +366,18 @@ SimCityRecompFrameResult ds3_advance_frame(void) {
     unsigned fw = simcity_recomp_frame_width(g_recomp);
     unsigned fh = SIMCITY_RECOMP_FRAME_HEIGHT;
 
-    if (frame && fw > 0 && fh > 0 && result.frame_rendered) {
-        ds3_render_frame(frame, fw, fh,
-                         CORE_FRAME_CROP_TOP,
-                         CORE_FRAME_CROP_LEFT,
-                         CORE_FRAME_CROP_RIGHT);
+    /* Skip frame conversion in headless/satellite mode for performance */
+    if (!g_headless_mode && !g_satellite_mode) {
+        if (frame && fw > 0 && fh > 0 && result.frame_rendered) {
+            ds3_render_frame(frame, fw, fh,
+                             CORE_FRAME_CROP_TOP,
+                             CORE_FRAME_CROP_LEFT,
+                             CORE_FRAME_CROP_RIGHT);
+        }
     }
 
     g_dbg_phase_us[DBGK_PHASE_RENDER] =
-        (uint32_t)(svcGetSystemTick() - t_render);
+        ds3_ticks_to_us(svcGetSystemTick() - t_render);
     uint64_t t_hud = svcGetSystemTick();
 
     /* Render HUD on bottom screen. Gated: by default this clears the console
@@ -348,7 +389,7 @@ SimCityRecompFrameResult ds3_advance_frame(void) {
     uint32_t frame_num   = simcity_recomp_current_frame(g_recomp);
     ds3_render_hud(instr_count, master_clk, frame_num, result.renderer_error);
     g_dbg_phase_us[DBGK_PHASE_HUD] =
-        (uint32_t)(svcGetSystemTick() - t_hud);
+        ds3_ticks_to_us(svcGetSystemTick() - t_hud);
     }
 
     return result;
@@ -560,14 +601,14 @@ int main(int argc, char **argv) {
            0.007% of the CPU, so the cost is somewhere in this loop and only
            measurement can say where. Averaged so one slow iteration lies less. */
         g_dbg_phase_us[DBGK_PHASE_ADVANCE] =
-            (uint32_t)(svcGetSystemTick() - t_loop);
+            ds3_ticks_to_us(svcGetSystemTick() - t_loop);
         t_loop = svcGetSystemTick();
 
         /* Update audio playback — drain ring buffer to hardware */
         ds3_audio_pump();
 
         g_dbg_phase_us[DBGK_PHASE_AUDIO] =
-            (uint32_t)(svcGetSystemTick() - t_loop);
+            ds3_ticks_to_us(svcGetSystemTick() - t_loop);
         t_loop = svcGetSystemTick();
 
         /* Host debug channel: service the TCP server (non-blocking). Lets the
@@ -577,7 +618,7 @@ int main(int argc, char **argv) {
         ds3ftp_poll();
 
         g_dbg_phase_us[DBGK_PHASE_DEBUG] =
-            (uint32_t)(svcGetSystemTick() - t_loop);
+            ds3_ticks_to_us(svcGetSystemTick() - t_loop);
         t_loop = svcGetSystemTick();
 
 
@@ -597,9 +638,9 @@ int main(int argc, char **argv) {
         }
 
         g_dbg_phase_us[DBGK_PHASE_PRESENT] =
-            (uint32_t)(svcGetSystemTick() - t_loop);
+            ds3_ticks_to_us(svcGetSystemTick() - t_loop);
         g_dbg_phase_us[DBGK_PHASE_LOOP] =
-            (uint32_t)(svcGetSystemTick() - loop_start);
+            ds3_ticks_to_us(svcGetSystemTick() - loop_start);
         for (int _p = 0; _p < DBGK_PHASE_COUNT; _p++) {
             g_dbg_phase_avg[_p] =
                 (g_dbg_phase_avg[_p] * 7u + g_dbg_phase_us[_p]) / 8u;

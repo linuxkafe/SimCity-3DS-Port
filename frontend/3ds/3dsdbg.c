@@ -621,19 +621,41 @@ static void dbgk_ext(const char *line) {
         snprintf(m, sizeof(m), "OK chan=%d\n", mode);
         dbgk_send_str(m);
     } else if (!strcmp(verb, "prof")) {
+        /* Argument order MUST match DBGK_PHASE_* order, which is the order the
+         * format string below reads them in.
+         *
+         * It previously did not: the arguments were listed ADVANCE, AUDIO,
+         * DEBUG, PRESENT, LOOP, CORE, RENDER, HUD against a format expecting
+         * ADVANCE, CORE, RENDER, HUD, AUDIO, DEBUG, PRESENT, LOOP. Every label
+         * after the first was therefore bound to the wrong phase -- `prof`
+         * reported LOOP under the name `audio` and CORE under the name `dbg`.
+         * Cross-checked against `state`, which builds its own line and was
+         * correct, every value matched its shifted neighbour exactly.
+         *
+         * The consequence is not cosmetic: this verb is the one T023 profiles
+         * with, so any conclusion drawn from it so far attributed cost to the
+         * wrong phase. The scratch that hid this is that the mislabelled
+         * numbers still looked plausible -- a wrong phase that happens to
+         * have a plausible magnitude is worse than an obviously broken one.
+         *
+         * `avg` previously omitted RENDER and HUD entirely, so the two phases
+         * a render optimisation would target had no average to read. */
         char m[320];
         int n = snprintf(m, sizeof(m),
             "OK now[adv=%u core=%u render=%u hud=%u audio=%u dbg=%u present=%u loop=%u] "
-            "avg[adv=%uus audio=%uus dbg=%uus present=%uus loop=%uus]",
+            "avg[adv=%u core=%u render=%u hud=%u audio=%u dbg=%u present=%u loop=%u]",
             (unsigned)g_dbg_phase_us[DBGK_PHASE_ADVANCE],
+            (unsigned)g_dbg_phase_us[DBGK_PHASE_CORE],
+            (unsigned)g_dbg_phase_us[DBGK_PHASE_RENDER],
+            (unsigned)g_dbg_phase_us[DBGK_PHASE_HUD],
             (unsigned)g_dbg_phase_us[DBGK_PHASE_AUDIO],
             (unsigned)g_dbg_phase_us[DBGK_PHASE_DEBUG],
             (unsigned)g_dbg_phase_us[DBGK_PHASE_PRESENT],
             (unsigned)g_dbg_phase_us[DBGK_PHASE_LOOP],
-            (unsigned)g_dbg_phase_us[DBGK_PHASE_CORE],
-            (unsigned)g_dbg_phase_us[DBGK_PHASE_RENDER],
-            (unsigned)g_dbg_phase_us[DBGK_PHASE_HUD],
             (unsigned)g_dbg_phase_avg[DBGK_PHASE_ADVANCE],
+            (unsigned)g_dbg_phase_avg[DBGK_PHASE_CORE],
+            (unsigned)g_dbg_phase_avg[DBGK_PHASE_RENDER],
+            (unsigned)g_dbg_phase_avg[DBGK_PHASE_HUD],
             (unsigned)g_dbg_phase_avg[DBGK_PHASE_AUDIO],
             (unsigned)g_dbg_phase_avg[DBGK_PHASE_DEBUG],
             (unsigned)g_dbg_phase_avg[DBGK_PHASE_PRESENT],

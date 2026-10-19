@@ -156,6 +156,21 @@ extern volatile int g_dbg_hud;
 extern int g_ftp_listen_fd;
 extern int g_ftp_last_error;
 
+/* Profiling / satellite mode (set by `profile` verb):
+ *   0 = normal (60fps target, full render/audio)
+ *   1 = profile (headless advance, no render/audio, frame limit)
+ *   2 = satellite (offline logging only, no network) */
+extern volatile int g_profiling_mode;
+extern volatile int g_frame_limit;      /* 0 = unlimited, N = max frames */
+extern volatile int g_frame_count;      /* frames advanced this session */
+extern volatile int g_headless_mode;    /* 1 = skip render/audio for profiling */
+
+/* Satellite / failsafe debug state */
+extern volatile int g_satellite_mode;   /* 1 = offline logging only, no TCP */
+extern volatile int g_debug_transport;  /* 0=TCP, 1=UDP, 2=file, 3=multi */
+extern volatile uint32_t g_last_heartbeat;  /* last successful heartbeat */
+extern volatile int g_connection_lost;  /* 1 = connection lost, needs reconnect */
+
 /* Service the server: accept a client, read commands, reply. Non-blocking;
    call once per iteration of the host application's main loop. */
 void dbgk_poll(void);
