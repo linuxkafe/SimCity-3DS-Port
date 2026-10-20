@@ -11,6 +11,7 @@
 
 #include <stdint.h>
 #include <stdio.h>
+#include <stdbool.h>
 
 #ifdef __cplusplus
 extern "C" {
@@ -111,7 +112,7 @@ extern volatile int g_put_remaining;
 extern FILE *g_put_file;
 
 /* Bring up the debug server (non-blocking TCP listen). Call once at startup. */
-void dbgk_init(void);
+bool dbgk_init(void);
 
 /* Tear the server down: close both sockets and release the soc:u context.
    Without this the port stays bound after the app leaves, which makes the next

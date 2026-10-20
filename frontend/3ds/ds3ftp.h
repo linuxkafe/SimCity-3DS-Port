@@ -12,16 +12,17 @@
 extern "C" {
 #endif
 
-/* Bind the FTP control port (5000). Requires dbgk_init() to have brought up
-   soc:u first — both servers share that context. */
-void ds3ftp_init(void);
+#include <stdbool.h>
+#include <stdint.h>
+#include <stdio.h>
 
-/* Service the server. Non-blocking; call once per main-loop iteration, the
-   same place dbgk_poll() is called. */
-void ds3ftp_poll(void);
+/* Public state the bridge needs. */
+extern int g_ftp_listen_fd;
 
-/* Close the listener, the client and any transfer in progress. */
+/* Initialise the FTP server (non-blocking). Returns true on success. */
+bool ds3ftp_init(void);
 void ds3ftp_exit(void);
+void ds3ftp_poll(void);
 
 #ifdef __cplusplus
 }

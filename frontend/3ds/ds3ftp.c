@@ -326,17 +326,17 @@ static void ftp_exec(int fd, char *cmd, char *arg) {
 
 /* ── Public API ────────────────────────────────────────────────────── */
 
-void ds3ftp_init(void) {
+bool ds3ftp_init(void) {
     struct sockaddr_in addr;
     int opt = 1;
 
-    if (g_listen >= 0) return;
+    if (g_listen >= 0) return true;
 
     g_listen = socket(AF_INET, SOCK_STREAM, IPPROTO_IP);
     if (g_listen < 0) {
         g_ftp_last_error = errno;
         printf("[ftp] socket() failed: %d %s\n", errno, strerror(errno));
-        return;
+        return false;
     }
     setsockopt(g_listen, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
 
@@ -351,11 +351,12 @@ void ds3ftp_init(void) {
         g_ftp_last_error = errno;
         close(g_listen);
         g_listen = -1;
-        return;
+        return false;
     }
     g_ftp_listen_fd = g_listen;
     fcntl(g_listen, F_SETFL, fcntl(g_listen, F_GETFL, 0) | O_NONBLOCK);
     printf("[ftp] listening on %d, root sdmc:/\n", FTP_PORT);
+    return true;
 }
 
 void ds3ftp_exit(void) {

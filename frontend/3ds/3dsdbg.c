@@ -72,6 +72,7 @@ int g_dbg_rotate_mode = -1;
 static int g_listen_fd = -1;
 static int g_client_fd = -1;
 
+
 /* Instrumentation for dbgk_poll(). Counters only -- no control flow in
    dbgk_poll() is altered by this, and none of these are consulted when
    deciding anything.
@@ -247,7 +248,7 @@ static int dbgk_add_break(uint32_t addr) {
     g_breaks[g_break_count].addr      = addr;
     g_breaks[g_break_count].orig      = 0;
     g_breaks[g_break_count].installed = 1;
-#ifndef DBGK_HOST_TEST
+#if !DBGK_HOST_TEST
     g_breaks[g_break_count].orig      = *(volatile uint32_t *)addr;
     *(volatile uint32_t *)addr = 0xE1200070u;   /* BKPT #0 */
     __builtin___clear_cache((char *)addr, (char *)addr + 4);
@@ -259,7 +260,7 @@ static int dbgk_add_break(uint32_t addr) {
 static int dbgk_remove_break(uint32_t addr) {
     for (int i = 0; i < g_break_count; i++) {
         if (g_breaks[i].addr == addr) {
-#ifndef DBGK_HOST_TEST
+#if !DBGK_HOST_TEST
             if (dbgk_addr_plausible(addr)) {
                 *(volatile uint32_t *)addr = g_breaks[i].orig;
                 __builtin___clear_cache((char *)addr, (char *)addr + 4);
@@ -483,7 +484,7 @@ static char g_put_final[128];
    back a different pointer after gfxSwapBuffers() (gfx.h:140), so a cached
    address would read a buffer the renderer is not currently writing. */
 static u8 *dbgk_get_fb(int screen, u16 *w, u16 *h) {
-#ifdef DBGK_HOST_TEST
+#if DBGK_HOST_TEST
     static u16 fake[240 * 400];
     *w = 240; *h = 400;
     (void)screen;
@@ -943,6 +944,33 @@ static void dbgk_feed(const char *data, size_t len) {
     }
 }
 
+/* mtheall/ftpd: APT hook for suspend/resume handling.
+   On suspend: Wi-Fi drops, we need to close sockets and re-init on resume. */
+static void dbgk_apt_hook(APT_HookType type, void *param) {
+    (void)param;
+    switch (type) {
+        case APTHOOK_ONSUSPEND:
+        case APTHOOK_ONSLEEP:
+            /* Wi-Fi will drop; close sockets and shut down soc:u */
+            if (g_client_fd >= 0) { close(g_client_fd); g_client_fd = -1; }
+            if (g_listen_fd >= 0) { close(g_listen_fd); g_listen_fd = -1; }
+            if (g_soc_buffer) {
+                socExit();
+                free(g_soc_buffer);
+                g_soc_buffer = NULL;
+            }
+            printf("[dbgk] suspend: sockets closed, socExit\n");
+            break;
+        case APTHOOK_ONRESTORE:
+        case APTHOOK_ONWAKEUP:
+            /* Wi-Fi restored; next dbgk_init() call will re-init */
+            printf("[dbgk] resume: ready to re-init\n");
+            break;
+        default:
+            break;
+    }
+}
+
 /* ── Public API ─────────────────────────────────────────────────────── */
 
 /* Context buffer for soc:u. Must be page-aligned (0x1000) and a multiple of
@@ -951,67 +979,100 @@ static void dbgk_feed(const char *data, size_t len) {
 #define DBGK_SOC_ALIGN   0x1000
 #define DBGK_SOC_BUFSIZE 0x100000
 
-void dbgk_init(void) {
+bool dbgk_init(void) {
     struct sockaddr_in server;
     int opt = 1;
 
+    /* mtheall/ftpd (source/3ds/platform.cpp, startNetwork) brings soc:u up only
+       once ACU reports Wi-Fi visible, and retries from the main loop until it
+       does. Calling socInit at boot, before the connection exists, leaves every
+       later socket() failing with ENODEV. Returning false here lets the caller
+       retry; the soc buffer is only allocated once Wi-Fi is up. */
     if (!g_soc_buffer) {
+        /* mtheall/ftpd pattern: check Wi-Fi visibility first */
+        static bool s_acu_ok = false;
+        static bool s_ndmu_locked = false;
+        if (!s_acu_ok) {
+            Result rc = acInit();
+            if (R_SUCCEEDED(rc)) s_acu_ok = true;
+            else {
+                printf("[dbgk] acInit failed: 0x%08X\n", (unsigned)acInit());
+                return false;
+            }
+        }
+
+        u32 wifi = 0;
+        if (R_FAILED(ACU_GetWifiStatus(&wifi)) || !wifi) {
+            printf("[dbgk] waiting for Wi-Fi...\n");
+            return false;
+        }
+
+        /* mtheall/ftpd: allocate soc:u buffer only after Wi-Fi is up */
         g_soc_buffer = (u32 *)memalign(DBGK_SOC_ALIGN, DBGK_SOC_BUFSIZE);
         if (!g_soc_buffer) {
             printf("[dbgk] memalign for soc context failed\n");
-            return;
+            return false;
         }
-#ifndef DBGK_HOST_TEST
+
         Result rc = socInit(g_soc_buffer, DBGK_SOC_BUFSIZE);
         if (rc != 0) {
             printf("[dbgk] socInit failed: 0x%08X\n", (unsigned)rc);
             free(g_soc_buffer);
             g_soc_buffer = NULL;
-            return;
+            return false;
         }
         printf("[dbgk] socInit ok\n");
-#else
-        printf("[dbgk] host test: socInit skipped\n");
-#endif
+/* mtheall/ftpd: prevent sleep during network operations */
+        aptSetSleepAllowed(false);
+
+        /* mtheall/ftpd: take exclusive NDM state for network operations */
+        Result rc_ndm = NDMU_EnterExclusiveState(NDM_EXCLUSIVE_STATE_INFRASTRUCTURE);
+        if (R_FAILED(rc_ndm)) {
+            printf("[dbgk] NDMU_EnterExclusiveState failed: 0x%08X\n", (unsigned)rc_ndm);
+            return false;
+        }
+
+        Result rc_lock = NDMU_LockState();
+        if (R_FAILED(rc_lock)) {
+            printf("[dbgk] NDMU_LockState failed: 0x%08X\n", (unsigned)rc_lock);
+            NDMU_LeaveExclusiveState();
+            return false;
+        }
+
+        /* mtheall/ftpd: register APT hook for suspend/resume handling */
+        static aptHookCookie s_dbgk_apt_hook;
+        aptHook(&s_dbgk_apt_hook, dbgk_apt_hook, NULL);
+        printf("[dbgk] aptHook registered for suspend/resume\n");
+
+        printf("[dbgk] soc:u up, Wi-Fi ready\n");
     }
+    /* Enable per-frame tracing by default for crash debugging */
+    g_dbg_trace_perframe = 1;
 
     g_listen_fd = socket(AF_INET, SOCK_STREAM, IPPROTO_IP);
     if (g_listen_fd < 0) {
         printf("[dbgk] socket() failed: %d %s\n", errno, strerror(errno));
-        return;
+        return false;
     }
     setsockopt(g_listen_fd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
 
     memset(&server, 0, sizeof(server));
     server.sin_family = AF_INET;
     server.sin_port   = htons(DBGK_PORT);
-    server.sin_addr.s_addr = gethostid();
+    server.sin_addr.s_addr = htonl(INADDR_ANY);
 
     if (bind(g_listen_fd, (struct sockaddr *)&server, sizeof(server)) < 0) {
-        /* Retry on the wildcard address: gethostid() can return something the
-           local stack will not accept as a bind target. */
-        int e1 = errno;
-        memset(&server, 0, sizeof(server));
-        server.sin_family = AF_INET;
-        server.sin_port   = htons(DBGK_PORT);
-        server.sin_addr.s_addr = htonl(INADDR_ANY);
-        if (bind(g_listen_fd, (struct sockaddr *)&server, sizeof(server)) < 0) {
-            printf("[dbgk] bind() failed: %d %s (any: %d %s)\n",
-                   e1, strerror(e1), errno, strerror(errno));
-            close(g_listen_fd);
-            g_listen_fd = -1;
-            return;
-        }
-        printf("[dbgk] bind fallback INADDR_ANY ok (gethostid bind was %d)\n", e1);
+        printf("[dbgk] bind() failed: %d %s\n", errno, strerror(errno));
+        close(g_listen_fd);
+        g_listen_fd = -1;
+        return false;
     }
 
-    /* Non-blocking so the host application's loop never stalls on the net. */
-    fcntl(g_listen_fd, F_SETFL, fcntl(g_listen_fd, F_GETFL, 0) | O_NONBLOCK);
-    if (listen(g_listen_fd, 2) < 0) {
+    if (listen(g_listen_fd, 4) < 0) {
         printf("[dbgk] listen() failed: %d %s\n", errno, strerror(errno));
         close(g_listen_fd);
         g_listen_fd = -1;
-        return;
+        return false;
     }
 
     /* Announce the address actually bound, so the operator knows where to
@@ -1022,6 +1083,8 @@ void dbgk_init(void) {
         printf("[dbgk] listening on %s:%d\n", inet_ntoa(bound.sin_addr), DBGK_PORT);
     else
         printf("[dbgk] listening on :%d\n", DBGK_PORT);
+
+    return true;
 }
 
 void dbgk_exit(void) {
@@ -1146,7 +1209,7 @@ void dbgk_poll(void) {
 
 void dbgk_dump_screen(const char *path, int screen) {
     u16 w = 0, h = 0;
-#ifdef DBGK_HOST_TEST
+#if DBGK_HOST_TEST
     static u16 fake[240 * 400];
     u8 *fb = (u8 *)fake;
     w = 240; h = 400;

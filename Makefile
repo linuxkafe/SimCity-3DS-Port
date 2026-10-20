@@ -2,6 +2,7 @@
 
 DOCKER_IMAGE ?= devkitpro/devkitarm
 WORK_DIR     ?= $(PWD)
+DBGK_HOST_TEST ?= 0
 # Upstream must be the repository root; the build mounts it and CMake appends
 # /static-recomp. The old .../PC/scssr/... path never existed on this machine.
 UPSTREAM     ?= /home/seyon/dev/Games/PC/SimCity-SNES-Static-Recomp
@@ -20,7 +21,8 @@ endif
 
 .PHONY: all docker-build docker-clean docker-run check doctor setup \
         ds-build ds-test-headless ds-rom-size \
-        3ds-build 3ds-test-headless 3ds-rom-size
+        3ds-build 3ds-test-headless 3ds-rom-size \
+        docker-run doctor clean three three-build three-upload three-restart three-debug three-custom three-ci
 
 all: docker-build
 
@@ -43,7 +45,8 @@ docker-build:
 				-DCMAKE_TOOLCHAIN_FILE=$(TOOLCHAIN) \
 				-DCMAKE_BUILD_TYPE=Release \
 				-DUPSTREAM_SRC_DIR=/upstream/static-recomp \
-				-DPLATFORM=$(PLATFORM); \
+				-DPLATFORM=$(PLATFORM) \
+				-DDBGK_HOST_TEST=$(DBGK_HOST_TEST); \
 			make -j$$(nproc) 2>&1 | tail -100'
 
 # ── Quick native build (requires devkitARM installed) ───────────────
@@ -103,6 +106,42 @@ ds-rom-size: ds-build
 3ds-rom-size: 3ds-build
 	@ls -la build/*.3dsx 2>/dev/null || echo "No .3dsx produced yet. Run 'make 3ds-build'."
 
+# ── Autonomous 3DS toolchain (three.py) ──────────────────────────────
+
+# Full pipeline: build → upload → restart → debug
+three: three-build three-upload three-restart three-debug
+
+# Individual phases
+three-build:
+	@echo "=== Building ==="
+	python3 tools/three.py --host $(THREE_HOST) --port $(THREE_PORT) --ftp-port $(THREE_FTP_PORT) --build
+
+three-upload: three-build
+	@echo "=== Uploading ==="
+	python3 tools/three.py --host $(THREE_HOST) --port $(THREE_PORT) --ftp-port $(THREE_FTP_PORT) --upload
+
+three-restart: three-upload
+	@echo "=== Restarting ==="
+	python3 tools/three.py --host $(THREE_HOST) --port $(THREE_PORT) --ftp-port $(THREE_FTP_PORT) --restart
+
+three-debug: three-restart
+	@echo "=== Debug commands ==="
+	python3 tools/three.py --host $(THREE_HOST) --port $(THREE_PORT) --ftp-port $(THREE_FTP_PORT) --debug --cmd "prof" --cmd "state" --cmd "info"
+
+# Full pipeline with custom debug commands
+three-custom:
+	@python3 tools/three.py --host $(THREE_HOST) --port $(THREE_PORT) --ftp-port $(THREE_FTP_PORT) --build --upload --restart --debug $(THREE_CMDS)
+
+# CI mode: JSON output, exit codes
+three-ci:
+	@python3 tools/three.py --host $(THREE_HOST) --port $(THREE_PORT) --ftp-port $(THREE_FTP_PORT) --build --upload --restart --debug --cmd "prof" --json
+
+# Configuration (override via env or make THREE_HOST=...)
+THREE_HOST ?= 10.0.0.130
+THREE_PORT ?= 5002
+THREE_FTP_PORT ?= 5000
+THREE_CMDS ?= --cmd "prof" --cmd "state"
+
 # ── Emulator run ─────────────────────────────────────────────────────
 
 docker-run:
@@ -142,6 +181,22 @@ doctor:
 	@echo "=== Host arm-none-eabi toolchain ===" && \
 	(command -v arm-none-eabi-gcc &>/dev/null && echo "  Found at $$(which arm-none-eabi-gcc)" || \
 	 echo "  Not found — will use Docker build.")
+	@echo "=== Emulator host policy ===" && \
+	EMU=$$(command -v azahar 2>/dev/null; command -v citra 2>/dev/null; ls -d ~/Applications/azahar.AppImage 2>/dev/null); \
+	if [ -n "$$EMU" ]; then \
+		echo "  VIOLATION: 3DS emulator found on this host:"; echo "$$EMU" | sed 's/^/    /'; \
+		echo "  Azahar must run on the Steam Deck ONLY. This host is for building"; \
+		echo "  and source work; it has the RAM/CPU headroom to stall a timed run."; \
+		exit 1; \
+	else \
+		echo "  OK: no 3DS emulator on this host (correct)"; \
+	fi; \
+	if timeout 5 bash -c 'echo >/dev/tcp/deck@steamdeck/22' 2>/dev/null || \
+	   ssh -o BatchMode=yes -o ConnectTimeout=5 deck@steamdeck true 2>/dev/null; then \
+		echo "  OK: Steam Deck reachable — sanctioned emulator runner"; \
+	else \
+		echo "  WARN: Steam Deck unreachable — emulator runs are blocked until it is"; \
+	fi
 
 # ── Clean ────────────────────────────────────────────────────────────
 

@@ -337,12 +337,26 @@ target_link_libraries(simcity-3ds PRIVATE
         -Wl,-d -Wl,--emit-relocs -Wl,--use-blx -Wl,--gc-sections -Wl,--no-warn-mismatch
     )
 
+    # Network debug bridge switch (see frontend/3ds/3ds_main.c). Default on.
+    # Configure with -DDS3_NET_BRIDGE=0 to compile the TCP + FTP surface out.
+    if(NOT DEFINED DS3_NET_BRIDGE)
+        set(DS3_NET_BRIDGE 1)
+    endif()
+
+    # Host test mode for debug server (see frontend/3ds/3dsdbg.c).
+    # Skips 3DS socInit, uses host sockets directly. For Linux/emulator testing.
+    if(NOT DEFINED DBGK_HOST_TEST)
+        set(DBGK_HOST_TEST 0)
+    endif()
+
     target_compile_options(simcity-3ds PRIVATE
         ${ARM_C_FLAGS}
     )
 
     target_compile_definitions(simcity-3ds PRIVATE
         SIMCITY_PLATFORM_3DS
+        DS3_NET_BRIDGE=${DS3_NET_BRIDGE}
+        DBGK_HOST_TEST=${DBGK_HOST_TEST}
         TOP_SCREEN_WIDTH=256
         TOP_SCREEN_HEIGHT=240
         BOTTOM_SCREEN_WIDTH=256

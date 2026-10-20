@@ -25,7 +25,7 @@
 
 /* ── Constants ─────────────────────────────────────────────────────── */
 
-#define ROM_PATH "sdmc:/SimCity(USA).sfc"
+#define ROM_PATH "sdmc:/simcity.sfc"
 
 /* ── Crash-localisation tracing (T012) ─────────────────────────────
  *
@@ -135,6 +135,20 @@ static void ds3_trace(const char *fmt, ...) {
  * ~20 s, five orders of magnitude below the wrap point. */
 #define DS3_TICK_HZ 26827953ull
 
+/* Network debug bridge (TCP on DBGK_PORT plus the in-app FTP server).
+   Default on. Build with -DDS3_NET_BRIDGE=0 to compile the whole surface out.
+
+   This exists to make one question answerable with a single variable: whether the
+   recurring svc=0x32 fault and the stall after advance #4 belong to the network
+   stack or to the port. Oct-10 build: 0 faults, dies earlier at ptm:sysm.
+   Oct-18 build: 85 faults, stalls. The stack is new in that window, so it is the
+   first thing to hold constant -- see docs/DECK-RUN-2026-10-19.md.
+
+   It is a measurement switch, not a feature flag. Nothing else should read it. */
+#ifndef DS3_NET_BRIDGE
+#define DS3_NET_BRIDGE 1
+#endif
+
 static uint32_t ds3_ticks_to_us(uint64_t ticks) {
     return (uint32_t)((ticks * 1000000ull) / DS3_TICK_HZ);
 }
@@ -178,16 +192,19 @@ int ds3_init(const char *rom_path, char *out_error, size_t error_capacity) {
     if (!rom_path || !out_error) return 0;
 
     /* Load ROM from SD card */
+    ds3_trace("[T0] fopen: %s", rom_path);
     FILE *f = fopen(rom_path, "rb");
     if (!f) {
         snprintf(out_error, error_capacity,
                  "Cannot open ROM: %s", rom_path);
         return 0;
     }
+    ds3_trace("[T0] fopen: OK");
 
     fseek(f, 0, SEEK_END);
     long rom_size = ftell(f);
     rewind(f);
+    ds3_trace("[T0] rom_size: %ld", rom_size);
 
     if (rom_size <= 0 || rom_size > 0x100000) {
         /* SimCity SNES is 512 KB (0x80000); allow up to 1 MB. */
@@ -202,14 +219,18 @@ int ds3_init(const char *rom_path, char *out_error, size_t error_capacity) {
         snprintf(out_error, error_capacity, "Out of memory for ROM (%ld bytes)", rom_size);
         return 0;
     }
+    ds3_trace("[T0] malloc: OK (%ld bytes)", rom_size);
+
     size_t bytes_read = fread(rom_data, 1, (size_t)rom_size, f);
     fclose(f);
+    ds3_trace("[T0] fread: %zu/%ld bytes", bytes_read, rom_size);
     if (bytes_read != (size_t)rom_size) {
         free(rom_data);
         snprintf(out_error, error_capacity, "Incomplete ROM read: %zu/%ld",
                  bytes_read, rom_size);
         return 0;
     }
+    ds3_trace("[T0] ROM loaded OK");
 
     /* Create the static recompilation instance */
     char init_error[256];
@@ -469,6 +490,31 @@ static void ds3_dbg_state(char *buf, unsigned capacity) {
              (unsigned)g_dbg_phase_us[DBGK_PHASE_LOOP], g_ftp_listen_fd, fhash, err);
 }
 
+/* Brings up the debug bridge and FTP server. Called at boot and then about once
+   a second from the main loop until each one is listening, because Wi-Fi may
+   not be connected yet at launch (see dbgk_init). Reports each success once. */
+static void ds3_net_service_start(int force) {
+#if DS3_NET_BRIDGE
+    static int      s_dbg_up = 0;
+    static int      s_ftp_up = 0;
+    static unsigned s_tick   = 0;
+
+    if (!force && (++s_tick % 60u) != 0) return;
+    if (s_dbg_up && s_ftp_up) return;
+
+    if (!s_dbg_up && dbgk_init()) {
+        s_dbg_up = 1;
+        printf("\x1b[1;32m[NET] debug bridge OK, port 5002\x1b[0m\n");
+    }
+    if (s_dbg_up && !s_ftp_up && ds3ftp_init()) {
+        s_ftp_up = 1;
+        printf("\x1b[1;32m[NET] FTP OK, port 5000\x1b[0m\n");
+    }
+#else
+    (void)force;
+#endif
+}
+
 int main(int argc, char **argv) {
     (void)argc; (void)argv;
 
@@ -500,14 +546,14 @@ int main(int argc, char **argv) {
     ds3_audio_init();
 
     /* Bring up the TCP debug server (non-blocking). */
-    dbgk_init();
+    printf("[NET] waiting for Wi-Fi (debug 5002, FTP 5000)...\n");
+    ds3_net_service_start(1);
     dbgk_set_state_fn(ds3_dbg_state);
     /* Exposed for the determinism harness (T032). `reset` is what makes two
        runs comparable: without it the second starts wherever the first ended,
        and comparing frames then proves nothing. */
     dbgk_set_reset_fn(ds3_dbg_reset);
     dbgk_set_hash_fn(ds3_dbg_hash);
-    ds3ftp_init();
 
     /* Print startup banner */
     ds3_trace_open();
@@ -559,7 +605,7 @@ int main(int argc, char **argv) {
            the `quit` verb from the host. Both unwind through the same shutdown
            path so the 3DSX loader gets to return to the Home Menu. */
         if (g_dbg_quit ||
-            ((pressed & (KEY_SELECT | KEY_START)) == (KEY_SELECT | KEY_START))) {
+            ((held & (KEY_SELECT | KEY_START)) == (KEY_SELECT | KEY_START))) {
             ds3_trace("exit: quit requested (verb=%d)", g_dbg_quit);
             break;
         }
@@ -613,9 +659,12 @@ int main(int argc, char **argv) {
 
         /* Host debug channel: service the TCP server (non-blocking). Lets the
            host flip rotation and pull live pixels without button presses. */
+        ds3_net_service_start(0);
         dbgk_poll();
         dbgk_break_check();
+#if DS3_NET_BRIDGE
         ds3ftp_poll();
+#endif
 
         g_dbg_phase_us[DBGK_PHASE_DEBUG] =
             ds3_ticks_to_us(svcGetSystemTick() - t_loop);
@@ -658,7 +707,9 @@ int main(int argc, char **argv) {
     printf("\nShutting down...\n");
     ds3_render_exit();
     ds3_audio_exit();
+#if DS3_NET_BRIDGE
     ds3ftp_exit();
+#endif
     dbgk_exit();
     ds3_shutdown();
     gfxExit();
