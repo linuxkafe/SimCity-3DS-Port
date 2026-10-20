@@ -180,6 +180,12 @@ volatile int g_frame_limit = 0;           /* 0 = unlimited, N = max frames */
 volatile int g_frame_count = 0;           /* frames advanced this session */
 volatile int g_headless_mode = 0;         /* 1 = skip render/audio for profiling */
 
+/* Per-frame instruction counting (T025). Cumulative delta tells us how many
+   SNES instructions each emulated frame consumes. If it grows over time the
+   recompiler is re-translating; if stable the interpreter is consistent. */
+static uint64_t g_last_instr_count = 0;
+static uint64_t g_instr_per_frame  = 0;
+
 /* Satellite / failsafe debug state */
 volatile int g_satellite_mode = 0;       /* 1 = offline logging only, no TCP */
 volatile int g_debug_transport = 0;      /* 0=TCP, 1=UDP, 2=file, 3=multi */
@@ -340,6 +346,21 @@ SimCityRecompFrameResult ds3_advance_frame(void) {
            : simcity_recomp_advance(g_recomp, input, 1u, &result);
     if (g_trace_perframe)
         ds3_trace("[T5] simcity_recomp_advance returned rc=%d", rc);
+
+    /* Per-frame instruction count (T025 step 1). Cumulative delta tells us
+       how many SNES instructions each emulated frame consumes. If it grows
+       over time the recompiler is re-translating; if stable the interpreter
+       is consistent. Logged every 10 frames to avoid trace log flooding. */
+    uint64_t instr_now = simcity_recomp_instruction_count(g_recomp);
+    if (g_frame_count > 0) {
+        g_instr_per_frame = instr_now - g_last_instr_count;
+        if (g_frame_count % 10 == 0)
+            ds3_trace("[T5] instr/frame #%u: %llu",
+                      (unsigned)g_frame_count, (unsigned long long)g_instr_per_frame);
+    }
+    g_last_instr_count = instr_now;
+    g_frame_count++;
+
     g_dbg_phase_us[DBGK_PHASE_CORE] =
         ds3_ticks_to_us(svcGetSystemTick() - t_core);
     uint64_t t_render = svcGetSystemTick();
@@ -476,7 +497,8 @@ static void ds3_dbg_state(char *buf, unsigned capacity) {
              "frame=%u src=%p src_w=%u src_h=%u instructions=%llu master=%llu "
              "input=0x%04X injected=0x%04X chan=%d rot=%d "
              "build=" DS3_BUILD_ID " mode=%d hud=%d adv=%u core=%u render=%u hudus=%u "
-             "audio=%u dbg=%u present=%u loop=%u ftp=%d fh=%.16s last_error=%s",
+             "audio=%u dbg=%u present=%u loop=%u ftp=%d fh=%.16s "
+             "instr_frame=%llu last_error=%s",
              frame, src, fw, fh, instr, master,
              (unsigned)g_last_input, (unsigned)g_dbg_input,
              g_dbg_chan_swap, g_dbg_rotate_mode, g_dbg_advance_mode, g_dbg_hud,
@@ -487,7 +509,8 @@ static void ds3_dbg_state(char *buf, unsigned capacity) {
              (unsigned)g_dbg_phase_us[DBGK_PHASE_AUDIO],
              (unsigned)g_dbg_phase_us[DBGK_PHASE_DEBUG],
              (unsigned)g_dbg_phase_us[DBGK_PHASE_PRESENT],
-             (unsigned)g_dbg_phase_us[DBGK_PHASE_LOOP], g_ftp_listen_fd, fhash, err);
+             (unsigned)g_dbg_phase_us[DBGK_PHASE_LOOP], g_ftp_listen_fd, fhash,
+             (unsigned long long)g_instr_per_frame, err);
 }
 
 /* Brings up the debug bridge and FTP server. Called at boot and then about once
