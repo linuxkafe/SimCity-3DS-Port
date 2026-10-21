@@ -477,7 +477,13 @@ SimCityRecompFrameResult ds3_advance_frame(void) {
                  simcity_recomp_last_error(g_recomp));
     }
 
-    /* Drain any available audio into the ring buffer.
+    /* Drain audio from the core into the ring buffer.
+       The core produces ~533 stereo frames per SNES frame (32040 Hz @ 60 Hz).
+       The drain loop previously consumed ALL available samples every frame,
+       starving the ring buffer so ds3_audio_pump() never had enough samples
+       for the NDSP buffer (4272 stereo samples). Throttling to a fixed cap
+       per frame lets the ring buffer accumulate so the pump fires regularly.
+
        simcity_recomp_audio_read returns interleaved stereo (L,R,L,R,...)
        at SIMCITY_RECOMP_AUDIO_SAMPLE_RATE (32040 Hz).
        ds3_audio_pump() in main() feeds the CSND hardware directly at 32040 Hz. */
@@ -485,10 +491,16 @@ SimCityRecompFrameResult ds3_advance_frame(void) {
     if (g_trace_perframe && g_frame_count % 10 == 0)
         ds3_trace("[T5] audio avail: %zu", (unsigned long)avail);
     int16_t chunk[1024 * 2];
-    while (avail > 0) {
-        size_t take = avail < 1024u ? avail : 1024u;
+    /* Cap drain at 512 stereo frames per SNES frame. At 32040 Hz the core
+       produces ~534 frames/frame, so 512 leaves ~22 in the core to carry
+       into the next frame, preventing the ring buffer from being drained
+       dry every frame. */
+    size_t drain_cap = 512u;
+    size_t remaining = avail < drain_cap ? avail : drain_cap;
+    while (remaining > 0) {
+        size_t take = remaining < 1024u ? remaining : 1024u;
         size_t n = simcity_recomp_audio_read(g_recomp, chunk, take * 2);
-        avail -= n;
+        remaining -= n;
         /* Write interleaved stereo into ring buffer. */
         for (size_t i = 0; i < n; i += 2) {
             size_t pos = g_audio_write_pos % AUDIO_RING_SIZE;
@@ -499,7 +511,7 @@ SimCityRecompFrameResult ds3_advance_frame(void) {
         }
     }
     if (g_trace_perframe && g_frame_count % 10 == 0)
-        ds3_trace("[T5] audio drained: %zu remaining", (unsigned long)avail);
+        ds3_trace("[T5] audio drained: %zu of %zu remaining", (unsigned long)remaining, (unsigned long)avail);
 
     /* In headless mode the frame has not been converted yet. */
     if (g_dbg_advance_mode == 1) {
@@ -803,6 +815,8 @@ int main(int argc, char **argv) {
 
         /* Update audio playback — drain ring buffer to hardware */
         ds3_audio_pump();
+        if (g_trace_perframe && g_frame_count % 10 == 0)
+            ds3_trace("[T5] pump: ring_avail=%zu", (unsigned long)(g_audio_write_pos - g_audio_read_pos));
 
         g_dbg_phase_us[DBGK_PHASE_AUDIO] =
             ds3_ticks_to_us(svcGetSystemTick() - t_loop);
