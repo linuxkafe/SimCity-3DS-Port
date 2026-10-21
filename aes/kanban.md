@@ -14,6 +14,7 @@ current_ticket: T025
 | T033 | Automated paired A/B harness with bounds | high |
 | T039 | Pin the Deck's Azahar configuration | high |
 | T040 | `svc=0x32` kills the debug port | medium |
+| T044 | Extract the audio drain into a host-testable function | medium |
 | — | Verify output equality on hardware | high |
 
 ## Sprint 01 — Measurement Infrastructure
@@ -33,6 +34,9 @@ current_ticket: T025
 ## Done
 | ID | Title | Completed |
 |----|-------|-----------|
+| T041 | Headless Azahar fork — build from source, no Qt | 2026-10-21 |
+| T043 | The debug bridge's blocking accept froze the guest | 2026-10-21 |
+| T042 | Audio drain loop underflow hung the port | 2026-10-21 |
 | T038 | T025 build could not reach the main loop | 2026-10-21 |
 | T037 | Restore the control; find the abort | 2026-10-19 |
 | T036 | Drift-detecting measurement harness | 2026-10-19 |
