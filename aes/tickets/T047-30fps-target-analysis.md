@@ -184,6 +184,51 @@ and only then does the "is the emulation a real static recompiler" question
 matter.** The scheduler is emulation, so it moves the T047 floor in the
 right direction, but it is not a rewrite.
 
+## UPDATE — the T030 series is done: 1.38× native, 1.33× on the 3DS, and the emulator passes 30 fps
+
+Three upstream tickets, all output-identical against the pre-T059 baseline
+(343-entry `--hash` stream and all 73 `--shots` BMPs byte-identical over 900
+frames of the T048 city input cadence, ctest 4/4):
+
+| upstream | what | native | 3DS |
+|---|---|---:|---:|
+| T059 | hoist the per-pixel work the per-line setup already did; cache the per-pixel map lookups per tile | 1.13× | 1.18× |
+| T060 | cache the tile *data* bytes per tile row instead of per pixel | +1.03× | — |
+| T061 | step the PPU clock to the next event instead of one master clock at a time | +1.13× | — |
+| **total** | | **1.38×** | **1.33×** |
+
+Commits: `0c31e4e` (T059), `59c19fc` (T060), `7eea606` (T061).
+
+### The emulator target is met
+
+```
+3DS emulator, live city:   27.9 fps  ->  71.9 fps
+```
+
+**30 fps in the emulator is achieved, with margin.** That was the achievable
+half of the target in the original recommendation, and it came from the
+render path plus the scheduler — not from a recompiler rewrite.
+
+### The device target is not, and the gap is now precisely known
+
+The guest still needs **50.36 s of 3DS-clock time per SNES frame** in the
+live city (down from 67.14 s). On the device that is still 50.36 s, so the
+device frame rate is unchanged in order of magnitude.
+
+The 30-fps device target needs 33.3 ms per frame — a further **1,500×**.
+T047's floor calculation stands: 30 fps on a 268 MHz ARM11 is 725 ARM11
+cycles per SNES instruction, which is a normal budget for a *real* 65816→ARM11
+static recompiler and ~30-100× better than what this codebase does. That is
+a rewrite of the emulation core, not a tuning task, and it is the only thing
+left on the path to 30 fps on the device.
+
+### What is left in the frame, after the series
+
+The render path is no longer the bottleneck and the scheduler is no longer
+the bottleneck. The next profile would be needed to say what is — the
+remaining items were a long tail of 1-4 % lines, plus `snapshot_hash_bytes`
+at 1.7 % (the frame cache hashing 64 KiB of VRAM every frame).
+
 ## Acceptance
 
 - [x] The target is decomposed into its two independent components

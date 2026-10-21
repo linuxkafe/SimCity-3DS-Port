@@ -17,6 +17,7 @@ current_ticket: T025
 | T044 | Extract the audio drain into a host-testable function | medium |
 | T046 | Settle T023's contradictory frame-rate baseline on hardware | high |
 | T047 | 30 fps target: feasibility, decomposition, first move | high |
+| — | Make the emulation a real static recompiler (device 30 fps) | high |
 | — | Verify output equality on hardware | high |
 
 ## Sprint 01 — Measurement Infrastructure
