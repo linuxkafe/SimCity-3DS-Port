@@ -134,6 +134,56 @@ upstream T039 identifies as the highest-value optimisation available.
    The function-level truth is that the CPU is ~2 % and the renderer is
    ~71 %.
 
+## UPDATE — upstream T059: T030's mechanism was the wrong one, and the right one is underway
+
+T030's dirty-tile bitmap tracks **VRAM** writes. But the city map and the
+city camera live in **WRAM** (`SC_CITY_MAP_WRAM_OFFSET`,
+`SC_CITY_VIEW_X_OFFSET`). A renderer consulting a VRAM dirty bitmap is blind
+to camera movement and to map changes, and would emit a stale city — T037
+recorded this and it was never resolved.
+
+So T030 was reopened upstream as **T059**, with the other half of its goal
+("do not recompute what is already known") and none of the dirty-marking
+correctness surface:
+
+- the per-line setup computes `mode`, `mosaic_size` and `mosaic_enable`;
+  the per-pixel code re-read 0x2105 and 0x2106 (twice) per pixel per layer
+  and overwrote the correct `mosaic_size` with a recomputed copy of itself
+- `wrap_coordinate` for `world_x` was a signed 32-bit division per pixel per
+  layer, although `world_width` is always a power of two and the existing
+  `world_y` wrap already masked on that basis
+- the tilemap entry was resolved per pixel although it is a function of
+  (tile_x, tile_y) alone within a line
+- `city_map_tile_entry()` — two WRAM reads and a ROM read — was called per
+  pixel although the map is 8×8 cells
+
+**Result** (upstream `0c31e4e`):
+
+| | before | after | |
+|---|---:|---:|---:|
+| native x86, us/frame | 8978.9 | 7979.4 | 1.13× |
+| 3DS, guest clock per frame | 67.1 s | 57.1 s | 1.18× |
+
+Output provably unchanged: the 343-entry `--hash` stream and all 73 `--shots`
+BMPs are byte-identical to the baseline, and ctest is 4/4.
+
+**1.18× is not the 2× T059 asked for, and the ticket stays open.** The
+re-profile says why — the render path is no longer the bottleneck. The
+largest remaining item is now:
+
+```
+ 24.16 %  raw_clock (sc_v11_scheduler.c:79)
+```
+
+`sc_v11_scheduler_advance()` steps the PPU clock one master clock at a time,
+**357,000 times per frame**, for a timing model that only acts at a line
+boundary, at the NMI line, and at the auto-joypad deadline.
+
+**So the sequence of work is: render (done, 1.18×) → scheduler (next) →
+and only then does the "is the emulation a real static recompiler" question
+matter.** The scheduler is emulation, so it moves the T047 floor in the
+right direction, but it is not a rewrite.
+
 ## Acceptance
 
 - [x] The target is decomposed into its two independent components
