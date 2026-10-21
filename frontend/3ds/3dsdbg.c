@@ -1054,6 +1054,14 @@ bool dbgk_init(void) {
         printf("[dbgk] socket() failed: %d %s\n", errno, strerror(errno));
         return false;
     }
+    /* The LISTEN socket must be non-blocking.
+     *
+     * dbgk_poll() calls accept() once per frame. On a blocking listen socket
+     * that parks the guest's main thread until a host connects -- the game
+     * freezes with no host attached. The accepted client is already put into
+     * non-blocking mode below; the listener has to be as well, otherwise the
+     * poll that is supposed to be a poll blocks instead. */
+    fcntl(g_listen_fd, F_SETFL, fcntl(g_listen_fd, F_GETFL, 0) | O_NONBLOCK);
     setsockopt(g_listen_fd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
 
     memset(&server, 0, sizeof(server));
@@ -1173,7 +1181,15 @@ void dbgk_poll(void) {
 
     if (g_client_fd < 0) {
         int c = accept(g_listen_fd, NULL, NULL);
-        if (c < 0) { g_st_accept_fails++; g_st_accept_err = errno; }
+        if (c < 0) {
+            /* EAGAIN/EWOULDBLOCK means "nobody has connected yet", which is
+             * the normal state, not a failure. Counting it as a failure made
+             * the pollstat numbers unreadable. */
+            if (errno != EAGAIN && errno != EWOULDBLOCK) {
+                g_st_accept_fails++;
+                g_st_accept_err = errno;
+            }
+        }
         if (c >= 0) {
             g_st_accepts++;
             fcntl(c, F_SETFL, fcntl(c, F_GETFL, 0) | O_NONBLOCK);

@@ -499,16 +499,25 @@ SimCityRecompFrameResult ds3_advance_frame(void) {
     size_t remaining = avail < drain_cap ? avail : drain_cap;
     while (remaining > 0) {
         size_t take = remaining < 1024u ? remaining : 1024u;
-        size_t n = simcity_recomp_audio_read(g_recomp, chunk, take * 2);
-        remaining -= n;
-        /* Write interleaved stereo into ring buffer. */
-        for (size_t i = 0; i < n; i += 2) {
+        /* frame_capacity counts stereo FRAMES, not samples: each frame is two
+           interleaved samples and the chunk holds 1024 of them. Passing
+           take*2 would let the core return up to twice the frames asked for
+           -- more than `remaining`, and more than the chunk can hold. */
+        size_t n = simcity_recomp_audio_read(g_recomp, chunk, take);
+        /* Write interleaved stereo into ring buffer. n is a count of stereo
+           frames, so frame i contributes samples chunk[i*2] and chunk[i*2+1]
+           and the ring position advances by two. */
+        for (size_t i = 0; i < n; i++) {
             size_t pos = g_audio_write_pos % AUDIO_RING_SIZE;
-            g_audio_ring[pos] = chunk[i];
+            g_audio_ring[pos] = chunk[i * 2];
             pos = (g_audio_write_pos + 1) % AUDIO_RING_SIZE;
-            g_audio_ring[pos] = (i + 1 < n) ? chunk[i + 1] : 0;
+            g_audio_ring[pos] = chunk[i * 2 + 1];
             g_audio_write_pos += 2;
         }
+        /* `remaining` is unsigned. Subtracting a count larger than it would
+           wrap it to ~1.8e19 and turn this into an infinite loop, and a
+           count of zero would never make progress. Clamp both cases. */
+        remaining = (n == 0 || n >= remaining) ? 0 : remaining - n;
     }
     if (g_trace_perframe && g_frame_count % 10 == 0)
         ds3_trace("[T5] audio drained: %zu of %zu remaining", (unsigned long)remaining, (unsigned long)avail);
