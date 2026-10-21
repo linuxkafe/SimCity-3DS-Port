@@ -112,6 +112,30 @@ outcome of this ticket:
   with each attempt traced.
 - `[T0]` markers report each step of the load, so a stall localises to a call.
 
+## The working configuration, verified
+
+```
+sdmc_directory=/home/deck/.local/share/azahar-emu/sdmc/
+nand_directory=/home/deck/.local/share/azahar-emu/nand/
+use_custom_storage=false
+use_virtual_sd=true
+```
+
+This is what Azahar writes when it regenerates its own config
+(`rm ~/.config/azahar-emu/qt-config.ini`, then launch). The failing
+configuration is EmuDeck's reference config, which specifies the media
+directory instead. Azahar rewrites `use_custom_storage` to `false` at
+startup, so editing that key by hand does not stick — the paths the two
+configs leave behind are what differ.
+
+The `sdmc` path on the Deck is currently a **symlink to the media
+directory**, so the ROM is reachable at the mounted path. Recorded in
+`docs/DECK-RUNBOOK.md`; pinning it is T039.
+
+**Verified:** three consecutive runs of the T025 build, each reaching 10
+advances with `rendered=1` and producing byte-identical instruction
+counts.
+
 ## Acceptance Criteria
 
 - [x] `ds3_init()` failure is observable in the trace log, not only on the console
