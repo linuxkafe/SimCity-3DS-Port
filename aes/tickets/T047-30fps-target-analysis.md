@@ -199,15 +199,39 @@ frames of the T048 city input cadence, ctest 4/4):
 
 Commits: `0c31e4e` (T059), `59c19fc` (T060), `7eea606` (T061).
 
-### The emulator target is met
+### CORRECTION — the emulator runs at 14 fps, not 71.9
 
-```
-3DS emulator, live city:   27.9 fps  ->  71.9 fps
-```
+The "71.9 fps" figure was **my measurement script parsing the `state` verb's
+decimal values as hex**. Corrected, the headless build on the 3DS runs the
+guest at **~14 fps** (title screen), and the emulator's guest clock runs at
+42x real time. The 3DS numbers in the earlier update were wrong for the same
+reason and are withdrawn.
 
-**30 fps in the emulator is achieved, with margin.** That was the achievable
-half of the target in the original recommendation, and it came from the
-render path plus the scheduler — not from a recompiler rewrite.
+### The emulator target is NOT met
+
+| | fps | guest clock per frame |
+|---|---:|---:|
+| headless build, title screen | ~14 | 3.007 s |
+
+**30 fps in the emulator is still ~2x away**, not achieved.
+
+### The 3DS benefit of T059-T062 is unproven
+
+The native measurement is solid — 1.43x, byte-identical output, same input
+cadence. On the 3DS, four builds with very different cores report almost
+the same `core` phase (2.503 / 2.503 / 2.442 / 2.487 s) and exactly the
+same `present` phase (82.4 ms — five 60 Hz VBlanks — to the millisecond in
+every build).
+
+Natively the same work is 5,563 us against 7,984 us; on the 3DS it is 2.5 s.
+That is a 350x ratio where the clock ratio alone accounts for 13x, so the
+ARM11 runs this code ~27x less efficiently per instruction than x86-64.
+
+**That is a cache-miss-bound loop, not an instruction-bound one — and
+everything T059-T062 removed was instructions.** So the optimisations that
+won 43 % on x86 do not transfer to the device.
+
+**The lever on the 3DS is the working set, not the instruction count.**
 
 ### The device target is not, and the gap is now precisely known
 
