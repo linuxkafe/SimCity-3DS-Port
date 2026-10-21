@@ -16,6 +16,7 @@ current_ticket: T025
 | T040 | `svc=0x32` kills the debug port | medium |
 | T044 | Extract the audio drain into a host-testable function | medium |
 | T046 | Settle T023's contradictory frame-rate baseline on hardware | high |
+| T047 | 30 fps target: feasibility, decomposition, first move | high |
 | — | Verify output equality on hardware | high |
 
 ## Sprint 01 — Measurement Infrastructure
