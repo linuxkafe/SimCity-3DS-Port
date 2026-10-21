@@ -54,8 +54,14 @@ static FILE *g_trace = NULL;
 #define g_trace_perframe g_dbg_trace_perframe
 
 /* Lines emitted before the trace file is open are held here and flushed when
-   it opens. The ROM read must happen with no other handle open on the SD
-   card (see ds3_init), so the trace file is opened after it. */
+   it opens.
+
+   The trace file is opened AFTER the ROM is loaded, so that the card is
+   quiet while the ROM is being read. This was a precaution taken while the
+   Deck's stall was being chased, and the stall turned out to be the Azahar
+   configuration rather than this code (T038). The precaution is kept
+   because it costs nothing and keeps the load path free of a second open
+   handle on the card -- but it is not what fixed the stall. */
 #define DS3_PENDING_LINES 24
 static char g_pending[DS3_PENDING_LINES][256];
 static int  g_pending_count = 0;
