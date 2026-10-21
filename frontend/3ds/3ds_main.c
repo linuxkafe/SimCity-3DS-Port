@@ -482,6 +482,8 @@ SimCityRecompFrameResult ds3_advance_frame(void) {
        at SIMCITY_RECOMP_AUDIO_SAMPLE_RATE (32040 Hz).
        ds3_audio_pump() in main() feeds the CSND hardware directly at 32040 Hz. */
     size_t avail = simcity_recomp_audio_available(g_recomp);
+    if (g_trace_perframe && g_frame_count % 10 == 0)
+        ds3_trace("[T5] audio avail: %zu", (unsigned long)avail);
     int16_t chunk[1024 * 2];
     while (avail > 0) {
         size_t take = avail < 1024u ? avail : 1024u;
@@ -496,6 +498,8 @@ SimCityRecompFrameResult ds3_advance_frame(void) {
             g_audio_write_pos += 2;
         }
     }
+    if (g_trace_perframe && g_frame_count % 10 == 0)
+        ds3_trace("[T5] audio drained: %zu remaining", (unsigned long)avail);
 
     /* In headless mode the frame has not been converted yet. */
     if (g_dbg_advance_mode == 1) {
