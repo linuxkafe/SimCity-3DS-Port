@@ -74,6 +74,29 @@ enters this repository.**
 
 Split debug info: small enough to scp, symbols kept for post-mortem.
 
+## The debug bridge works
+
+Every live-query verb answers while the app is running:
+
+```
+ping      -> OK pong
+info      -> OK 3dsdbgkit/2 build=ftp16 breaks=0 ftp_listen=5 ftp_errno=0 cclog=0 anlz=1
+state     -> OK frame=293 src=0x80d1294 src_w=256 src_h=239 instructions=3716402
+              master=104657782 input=0x0000 injected=0x0000 chan=0
+pollstat  -> OK calls=295 accepts=4 afail=0 aerr=0 feeds=4 rbytes=25 rerr=0
+              reap=3 soerr=0 polln=1 hasclient=1
+prof      -> OK now[adv=3432285 core=3371992 render=60183 hud=14 audio=1987
+              dbg=156917 present=82432 loop=3674675] avg[...]
+```
+
+The bridge serves **one client at a time and does not greet**, so drive it
+with a fresh connection per command. `tools/bridge.py` does this properly
+(with wedge detection) and is the right thing to use for a real harness.
+
+`prof` gives a usable cross-check on T023's hand measurement: `core` is
+3371992 µs of a 3674675 µs loop — **91.8 %** against the 92.7 % T023
+recorded.
+
 ## What the headless build exposed
 
 The headless build is the first thing to run this port without a Qt

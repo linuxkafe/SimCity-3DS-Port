@@ -42,7 +42,7 @@ be read from `[T5] instr/frame` lines rather than from `state`.
       problem
 - [x] If the fault is benign to the guest, the network stack is fixed or
       worked around so the debug port survives it
-- [ ] If it is not benign, the port's live-query capability is either fixed
+- [x] If it is not benign, the port's live-query capability is either fixed
       or its loss is documented as a permanent limitation of the Deck
       measurement path
 - [x] The finding is recorded in `docs/` with the evidence
@@ -97,6 +97,26 @@ info -> OK 3dsdbgkit/2 build=ftp16 breaks=0 ftp_listen=5 ftp_errno=0 cclog=0 anl
 ```
 
 while the same run logs 70 `svc=0x32` errors.
+
+Every live-query verb answers, each on its own connection (the bridge serves
+one client at a time and does not greet, so a fresh connection per verb is
+the reliable way to drive it):
+
+```
+ping      -> OK pong
+info      -> OK 3dsdbgkit/2 build=ftp16 breaks=0 ftp_listen=5 ftp_errno=0 cclog=0 anlz=1
+state     -> OK frame=293 src=0x80d1294 src_w=256 src_h=239 instructions=3716402
+              master=104657782 input=0x0000 injected=0x0000 chan=0
+pollstat  -> OK calls=295 accepts=4 afail=0 aerr=0 feeds=4 rbytes=25 rerr=0
+              reap=3 soerr=0 polln=1 hasclient=1
+prof      -> OK now[adv=3432285 core=3371992 render=60183 hud=14 audio=1987
+              dbg=156917 present=82432 loop=3674675] avg[...]
+```
+
+`state` and `prof` are exactly the live measurement channel T040 said was
+lost. They work. The `prof` breakdown is also a usable cross-check on T023:
+`core` is 3371992 µs of a 3674675 µs loop, i.e. **91.8 %** — against the
+92.7 % T023 recorded by hand.
 
 ### The bridge was a separate defect
 
