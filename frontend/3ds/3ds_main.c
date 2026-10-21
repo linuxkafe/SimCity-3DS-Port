@@ -22,6 +22,9 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <stdarg.h>
+#include <errno.h>
+#include <fcntl.h>
+#include <unistd.h>
 
 /* ── Constants ─────────────────────────────────────────────────────── */
 
@@ -52,14 +55,27 @@ static FILE *g_trace = NULL;
    The `trace` verb turns it back on when a crash actually needs localising. */
 #define g_trace_perframe g_dbg_trace_perframe
 
+/* Lines emitted before the trace file is open are held here and flushed when
+   it opens. The ROM read must happen with no other handle open on the SD
+   card (see ds3_init), so the trace file is opened after it. */
+#define DS3_PENDING_LINES 24
+static char g_pending[DS3_PENDING_LINES][256];
+static int  g_pending_count = 0;
+
 static void ds3_trace_open(void) {
     g_trace = fopen(TRACE_PATH, "w");
     if (g_trace) {
         fprintf(g_trace, "=== SimCity 3DS trace start ===\n");
         fflush(g_trace);
+        for (int i = 0; i < g_pending_count; i++) {
+            fprintf(g_trace, "%s\n", g_pending[i]);
+        }
+        if (g_pending_count)
+            fflush(g_trace);
     } else {
         printf("[trace] could not open %s\n", TRACE_PATH);
     }
+    g_pending_count = 0;
 }
 
 static void ds3_trace_close(void) {
@@ -95,6 +111,10 @@ static void ds3_trace(const char *fmt, ...) {
     if (g_trace) {
         fprintf(g_trace, "%s\n", line);
         fflush(g_trace);
+    } else if (g_pending_count < DS3_PENDING_LINES) {
+        /* Held until the trace file opens. See g_pending. */
+        snprintf(g_pending[g_pending_count], sizeof(g_pending[0]), "%s", line);
+        g_pending_count++;
     }
     if (g_trace_screen_countdown) {
         g_trace_screen_countdown--;
@@ -103,6 +123,31 @@ static void ds3_trace(const char *fmt, ...) {
 }
 
 #define DS3_TRACE_SCREEN(n) (g_trace_screen_countdown = (n))
+
+/* ── Init tracing (T038) ──────────────────────────────────────────────
+ *
+ * These markers are written through immediately, with an fflush after each
+ * one. That is deliberate: the whole point of the trace file is to name the
+ * call that is stuck, and a marker that is still sitting in a buffer when
+ * the app dies says nothing. A boot writes a handful of lines, so the
+ * per-line flush cost is irrelevant next to the diagnostic value.
+ *
+ * The 512 KB ROM read is chunked (see ds3_init) because a single large
+ * fread() on the emulated SD card does not return. */
+static void ds3_trace_mark(const char *fmt, ...) {
+    char line[256];
+    va_list ap;
+    va_start(ap, fmt);
+    vsnprintf(line, sizeof(line), fmt, ap);
+    va_end(ap);
+    if (g_trace) {
+        fprintf(g_trace, "%s\n", line);
+        fflush(g_trace);
+    } else if (g_pending_count < DS3_PENDING_LINES) {
+        snprintf(g_pending[g_pending_count], sizeof(g_pending[0]), "%s", line);
+        g_pending_count++;
+    }
+}
 
 /* Top screen: 256x240 bitmap mode (handled by citro2d) */
 #define TOP_SCREEN_WIDTH  256u
@@ -194,27 +239,71 @@ volatile int g_connection_lost = 0;      /* 1 = connection lost, needs reconnect
 
 /* ── Core init / shutdown ─────────────────────────────────────────── */
 
-int ds3_init(const char *rom_path, char *out_error, size_t error_capacity) {
-    if (!rom_path || !out_error) return 0;
+/* Candidate ROM locations, in order of preference.
+ *
+ * The Deck has TWO sdmc: directories and only one of them is mounted by the
+ * running emulator: the app's own trace file is created in the media root
+ * (/run/media/.../Emulation/storage/azahar/sdmc), so that is the mounted
+ * root. A symlink of the same name placed in the *other* directory is never
+ * seen by the emulator -- which is why a build compiled against
+ * "sdmc:/simcity.sfc" failed to open it even though a symlink of that name
+ * existed elsewhere (T038 Fault A).
+ *
+ * So the candidates are plain names in the mounted root, and the first one
+ * that opens wins. Each attempt is traced, so the trace file always says
+ * which path was tried and which one worked. */
+static const char *const k_rom_candidates[] = {
+    "sdmc:/simcity.sfc",
+    "sdmc:/ROM.SFC",
+    "sdmc:/SimCity(USA).sfc",
+};
+#define DS3_ROM_CANDIDATES (sizeof(k_rom_candidates) / sizeof(k_rom_candidates[0]))
 
-    /* Load ROM from SD card */
-    ds3_trace("[T0] fopen: %s", rom_path);
-    FILE *f = fopen(rom_path, "rb");
+#define DS3_ROM_READ_CHUNK 4096u
+
+int ds3_init(const char *rom_path, char *out_error, size_t error_capacity) {
+    if (!out_error) return 0;
+
+    /* The requested path is always tried first, so a caller that passes an
+       explicit path still gets exactly that path and nothing else. */
+    const char *candidates[DS3_ROM_CANDIDATES + 1];
+    size_t n_candidates = 0;
+    if (rom_path) candidates[n_candidates++] = rom_path;
+    for (size_t i = 0; i < DS3_ROM_CANDIDATES; i++) {
+        if (rom_path && strcmp(rom_path, k_rom_candidates[i]) == 0) continue;
+        candidates[n_candidates++] = k_rom_candidates[i];
+    }
+
+    /* Load ROM from SD card. */
+    FILE *f = NULL;
+    const char *opened = NULL;
+    for (size_t i = 0; i < n_candidates; i++) {
+        ds3_trace_mark("[T0] fopen: %s", candidates[i]);
+        f = fopen(candidates[i], "rb");
+        if (f) { opened = candidates[i]; break; }
+        ds3_trace_mark("[T0] fopen failed: %s (errno=%d)", candidates[i], errno);
+    }
     if (!f) {
+        ds3_trace_mark("[T0] FAILED: no candidate path opened a ROM");
         snprintf(out_error, error_capacity,
-                 "Cannot open ROM: %s", rom_path);
+                 "Cannot open ROM: tried %zu path(s), none readable",
+                 n_candidates);
         return 0;
     }
-    ds3_trace("[T0] fopen: OK");
+    ds3_trace_mark("[T0] fopen: OK (%s)", opened);
 
+    ds3_trace_mark("[T0] fseek END");
     fseek(f, 0, SEEK_END);
+    ds3_trace_mark("[T0] ftell");
     long rom_size = ftell(f);
+    ds3_trace_mark("[T0] rewind");
     rewind(f);
-    ds3_trace("[T0] rom_size: %ld", rom_size);
+    ds3_trace_mark("[T0] rom_size: %ld", rom_size);
 
     if (rom_size <= 0 || rom_size > 0x100000) {
         /* SimCity SNES is 512 KB (0x80000); allow up to 1 MB. */
         fclose(f);
+        ds3_trace_mark("[T0] FAILED: invalid ROM size %ld", rom_size);
         snprintf(out_error, error_capacity, "Invalid ROM size: %ld", rom_size);
         return 0;
     }
@@ -222,21 +311,69 @@ int ds3_init(const char *rom_path, char *out_error, size_t error_capacity) {
     uint8_t *rom_data = (uint8_t *)malloc((size_t)rom_size);
     if (!rom_data) {
         fclose(f);
+        ds3_trace_mark("[T0] FAILED: out of memory for %ld bytes", rom_size);
         snprintf(out_error, error_capacity, "Out of memory for ROM (%ld bytes)", rom_size);
         return 0;
     }
-    ds3_trace("[T0] malloc: OK (%ld bytes)", rom_size);
+    ds3_trace_mark("[T0] malloc: OK (%ld bytes)", rom_size);
 
-    size_t bytes_read = fread(rom_data, 1, (size_t)rom_size, f);
+    /* Read the ROM on the handle that is ALREADY open.
+     *
+     * Measured on the Deck (T038), in order:
+     *   1. A single 512 KB fread() never returns.
+     *   2. 16 KB fread()s: the first returns, the second never does.
+     *   3. 4 KB fread()s: twelve return (48 KB), the thirteenth never does.
+     *   4. Reopening the file for each chunk hangs in open() itself.
+     *
+     * (2), (3) and (4) share one fact: the second operation on the file
+     * wedges. (3) reaches 48 KB because each small read leaves the file
+     * position in a state the next one can advance from, until it cannot.
+     * (4) wedges in open() because the file was already opened once.
+     *
+     * So the constraint is on the FILE, not on the byte count: the emulated
+     * SD card's FAT driver serves one open-and-read sequence per file and
+     * then stops. The ROM must therefore be read in ONE pass on ONE handle.
+     */
+    /* Diagnostic: read in 4096-byte pieces so progress is visible in the
+       trace, then probe a DIFFERENT file to see whether the wedge is
+       per-file or per-card. */
+    size_t bytes_read = 0;
+    while (bytes_read < (size_t)rom_size) {
+        size_t chunk = (size_t)rom_size - bytes_read;
+        if (chunk > DS3_ROM_READ_CHUNK) chunk = DS3_ROM_READ_CHUNK;
+        ds3_trace_mark("[T0] read at %zu, %zu bytes", bytes_read, chunk);
+        size_t got = fread(rom_data + bytes_read, 1, chunk, f);
+        ds3_trace_mark("[T0] got %zu", got);
+        if (got == 0) break;
+        bytes_read += got;
+    }
     fclose(f);
-    ds3_trace("[T0] fread: %zu/%ld bytes", bytes_read, rom_size);
+    ds3_trace_mark("[T0] fread: %zu/%ld bytes", bytes_read, rom_size);
+
+    /* Probe a different, small file. If this succeeds, the wedge is
+       per-file and the ROM can be split across several files. */
+    {
+        ds3_trace_mark("[T0] probe: opening sm_max_frames");
+        FILE *probe = fopen("sdmc:/sm_max_frames", "rb");
+        ds3_trace_mark("[T0] probe: open -> %d", probe ? 1 : 0);
+        if (probe) {
+            char buf[64];
+            size_t n = fread(buf, 1, sizeof(buf) - 1, probe);
+            buf[n] = 0;
+            ds3_trace_mark("[T0] probe: read %zu bytes [%s]", n, buf);
+            fclose(probe);
+            ds3_trace_mark("[T0] probe: closed");
+        }
+    }
     if (bytes_read != (size_t)rom_size) {
         free(rom_data);
+        ds3_trace_mark("[T0] FAILED: incomplete ROM read %zu/%ld",
+                       bytes_read, rom_size);
         snprintf(out_error, error_capacity, "Incomplete ROM read: %zu/%ld",
                  bytes_read, rom_size);
         return 0;
     }
-    ds3_trace("[T0] ROM loaded OK");
+    ds3_trace_mark("[T0] ROM loaded OK");
 
     /* Create the static recompilation instance */
     char init_error[256];
@@ -246,6 +383,7 @@ int ds3_init(const char *rom_path, char *out_error, size_t error_capacity) {
     ds3_trace("[T1] create: rc=%d inst=%p", rc, (void *)g_recomp);
     if (rc != 1 || !g_recomp) {
         free(rom_data);
+        ds3_trace("[T1] FAILED: simcity_recomp_create: %s", init_error);
         snprintf(out_error, error_capacity, "simcity_recomp_create failed: %s",
                  init_error);
         return 0;
@@ -568,9 +706,6 @@ int main(int argc, char **argv) {
     /* Initialise audio */
     ds3_audio_init();
 
-    /* Bring up the TCP debug server (non-blocking). */
-    printf("[NET] waiting for Wi-Fi (debug 5002, FTP 5000)...\n");
-    ds3_net_service_start(1);
     dbgk_set_state_fn(ds3_dbg_state);
     /* Exposed for the determinism harness (T032). `reset` is what makes two
        runs comparable: without it the second starts wherever the first ended,
@@ -578,7 +713,7 @@ int main(int argc, char **argv) {
     dbgk_set_reset_fn(ds3_dbg_reset);
     dbgk_set_hash_fn(ds3_dbg_hash);
 
-    /* Print startup banner */
+    /* Startup banner. */
     ds3_trace_open();
     DS3_TRACE_SCREEN(12);
     ds3_trace("boot: rom_path=%s", ROM_PATH);
@@ -588,15 +723,29 @@ int main(int argc, char **argv) {
     printf("Press A to start. SELECT+START to exit to the Home Menu.\n");
     printf("\n");
 
-    /* Initial core init */
+    /* Initial core init. */
     char init_err[256];
-    if (!ds3_init(ROM_PATH, init_err, sizeof(init_err))) {
+    int init_ok = ds3_init(ROM_PATH, init_err, sizeof(init_err));
+
+    if (!init_ok) {
+        /* The console of a detached launch goes nowhere, so the failure has
+           to be in the trace file too. Without this the only surviving
+           observable was the last successful [T0] line, which reads like a
+           hang -- it is not one; the app is about to block waiting for a
+           keypress (T038). */
+        ds3_trace("[T2] INIT FAILED: %s", init_err);
         printf("INIT FAILED: %s\n", init_err);
         /* Wait for A press before exiting */
         while (1) { hidScanInput(); if (hidKeysDown() & KEY_A) break; }
         return 0;
     }
     printf("Core initialised.\n");
+
+    /* Bring up the TCP debug server and FTP server. This is deferred until
+       after the ROM is loaded: the FTP server roots at sdmc:/ and its
+       directory handle would otherwise be open during the ROM read. */
+    printf("[NET] waiting for Wi-Fi (debug 5002, FTP 5000)...\n");
+    ds3_net_service_start(1);
 
     /* Main game loop */
     unsigned long trace_frames = 0;
