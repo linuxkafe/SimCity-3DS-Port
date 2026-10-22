@@ -21,7 +21,7 @@ endif
 
 .PHONY: all docker-build docker-clean docker-run check doctor setup \
         ds-build ds-test-headless ds-rom-size \
-        3ds-build 3ds-test-headless 3ds-rom-size \
+        3ds-build 3ds-build-native 3ds-test-headless 3ds-rom-size \
         docker-run doctor clean three three-build three-upload three-restart three-debug three-custom three-ci
 
 all: docker-build
@@ -46,8 +46,14 @@ docker-build:
 				-DCMAKE_BUILD_TYPE=Release \
 				-DUPSTREAM_SRC_DIR=/upstream/static-recomp \
 				-DPLATFORM=$(PLATFORM) \
-				-DDBGK_HOST_TEST=$(DBGK_HOST_TEST); \
+				-DDBGK_HOST_TEST=$(DBGK_HOST_TEST) \
+				-DDS3_USE_NATIVE_RENDER=$(DS3_USE_NATIVE_RENDER); \
 			make -j$$(nproc) 2>&1 | tail -100'
+
+# Build with GPU-native tile renderer (replaces CPU PPU render).
+docker-build-native:
+	@echo "Building SimCity3DS with GPU-native renderer inside $(DOCKER_IMAGE)..."
+	$(MAKE) docker-build DS3_USE_NATIVE_RENDER=1
 
 # ── Quick native build (requires devkitARM installed) ───────────────
 ds-build:
@@ -66,6 +72,17 @@ ds-build:
 	fi
 	mkdir -p build && cd build && \
 		cmake .. -DCMAKE_BUILD_TYPE=Release -DPLATFORM=3DS && \
+		make -j$(nproc)
+
+# Build with GPU-native tile renderer (replaces CPU PPU render with GPU tilemap rendering).
+# Use: make 3ds-build-native [DS3_USE_NATIVE_RENDER=1]
+3ds-build-native:
+	@if ! command -v arm-none-eabi-gcc &>/dev/null; then \
+		echo "arm-none-eabi-gcc not found. Use 'make docker-build-native' or install devkitARM."; \
+		exit 1; \
+	fi
+	mkdir -p build && cd build && \
+		cmake .. -DCMAKE_BUILD_TYPE=Release -DPLATFORM=3DS -DDS3_USE_NATIVE_RENDER=1 && \
 		make -j$(nproc)
 
 # ── Run headless test inside Docker ──────────────────────────────────

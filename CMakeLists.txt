@@ -302,6 +302,8 @@ else()
         frontend/3ds/3ds_main.c
         frontend/3ds/3ds_input.c
         frontend/3ds/3ds_render.c
+        frontend/3ds/3ds_render_gpu.c
+        frontend/3ds/3ds_render_native.c
         frontend/3ds/3ds_audio.c
         frontend/3ds/3dsdbg.c
         frontend/3ds/ds3ftp.c
@@ -362,6 +364,12 @@ target_link_libraries(simcity-3ds PRIVATE
         BOTTOM_SCREEN_WIDTH=256
         BOTTOM_SCREEN_HEIGHT=240
     )
+
+    # Native GPU tile render (replaces CPU PPU render with GPU tilemap rendering).
+    # OFF by default — only enabled with -DDS3_USE_NATIVE_RENDER=1.
+    if(DS3_USE_NATIVE_RENDER)
+        target_compile_definitions(simcity-3ds PRIVATE DS3_USE_NATIVE_RENDER=1)
+    endif()
 
     # Link to a real ELF, then package a genuine 3DSX container in a POST_BUILD step.
     # Linking straight to a ".3dsx" name produces a raw ELF that no 3DS loader

@@ -13,6 +13,10 @@
 #include "3ds_main.h"
 #include "3ds_input.h"
 #include "3ds_render.h"
+#include "3ds_render_gpu.h"
+#ifdef DS3_USE_NATIVE_RENDER
+#include "3ds_render_native.h"
+#endif
 #include "3dsdbg.h"
 #include "3ds_audio.h"
 #include "ds3ftp.h"
@@ -543,10 +547,19 @@ SimCityRecompFrameResult ds3_advance_frame(void) {
     /* Skip frame conversion in headless/satellite mode for performance */
     if (!g_headless_mode && !g_satellite_mode) {
         if (frame && fw > 0 && fh > 0 && result.frame_rendered) {
+#ifdef DS3_USE_NATIVE_RENDER
+            ds3_render_native_frame();
+#elif defined(DS3_USE_GPU_RENDER)
+            ds3_render_frame_gpu(frame, fw, fh,
+                                 CORE_FRAME_CROP_TOP,
+                                 CORE_FRAME_CROP_LEFT,
+                                 CORE_FRAME_CROP_RIGHT);
+#else
             ds3_render_frame(frame, fw, fh,
                              CORE_FRAME_CROP_TOP,
                              CORE_FRAME_CROP_LEFT,
                              CORE_FRAME_CROP_RIGHT);
+#endif
         }
     }
 
@@ -695,7 +708,13 @@ int main(int argc, char **argv) {
     consoleInit(GFX_BOTTOM, NULL);
 
     /* Initialize framebuffer pointers for rendering */
+#ifdef DS3_USE_NATIVE_RENDER
+    ds3_render_native_init();
+#elif defined(DS3_USE_GPU_RENDER)
+    ds3_render_init_gpu();
+#else
     ds3_render_init();
+#endif
 
     /* Initialise audio */
     ds3_audio_init();
@@ -879,7 +898,13 @@ int main(int argc, char **argv) {
        framebuffer to draw into. Leaving the socket bound makes the next run
        look like a dead device rather than a closed app. */
     printf("\nShutting down...\n");
+#ifdef DS3_USE_NATIVE_RENDER
+    ds3_render_native_exit();
+#elif defined(DS3_USE_GPU_RENDER)
+    ds3_render_exit_gpu();
+#else
     ds3_render_exit();
+#endif
     ds3_audio_exit();
 #if DS3_NET_BRIDGE
     ds3ftp_exit();
