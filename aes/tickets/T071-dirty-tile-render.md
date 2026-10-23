@@ -1,6 +1,6 @@
 # T071 — Dirty-tile render path (replaces whole-frame cache)
 
-Status: in progress (skip_city working for all frames, core 2.96→1.61s -46%, fps 12.4→12.7 +2%, needs emulator overhead reduction)
+Status: in progress (skip_city working, core 2.96→1.61s -46%, fps 12.4→12.7, remaining render ~1.0s in non-city layers)
 Opened: 2026-10-23
 
 ## Why this ticket exists
