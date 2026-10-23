@@ -1,6 +1,6 @@
 # T071 — Dirty-tile render path (replaces whole-frame cache)
 
-Status: in progress (infra in place, perf ~8.5 fps, needs render_lines_impl skip_city flag)
+Status: in progress (infra in place, overlay fixed, perf still ~7.3 fps, needs skip_city in render_lines_impl)
 Opened: 2026-10-23
 
 ## Why this ticket exists
