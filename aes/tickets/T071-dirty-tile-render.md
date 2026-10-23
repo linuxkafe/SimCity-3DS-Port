@@ -1,6 +1,6 @@
 # T071 — Dirty-tile render path (replaces whole-frame cache)
 
-Status: in progress (gate PASS, performance not yet improved)
+Status: in progress (infrastructure in place, perf optimization needs render_lines_impl changes)
 Opened: 2026-10-23
 
 ## Why this ticket exists
