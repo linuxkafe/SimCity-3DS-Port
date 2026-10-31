@@ -1,11 +1,11 @@
 /*
  * 3ds_render_native.c — Native GPU tile-based rendering for SimCity 3DS.
  *
- * Replaces the CPU-side sc_v28_render() pixel loop with a GPU-accelerated
- * pipeline: the CPU pre-assembles visible tilemap pixels into a texture
- * (simple tile lookup + palette indexing, no per-pixel priority/color-math),
- * then the GPU renders it as a fullscreen quad. This eliminates the dominant
- * per-pixel PPU emulation cost.
+ * Uses a tile atlas (Zelda3-style) to cache decoded 8x8 tiles.  The CPU
+ * assembles the full frame into a texture using the atlas for fast tile
+ * lookup, then the GPU renders a single fullscreen quad.  This keeps the
+ * simple, crash-free fullscreen-quad path while gaining the atlas cache
+ * (avoids re-decoding identical tiles every frame).
  */
 
 #include "3ds_render_native.h"
@@ -16,10 +16,17 @@
 #include <string.h>
 #include <stdio.h>
 
-/* SNES PPU constants */
+/* ── Constants ── */
+#define OUTPUT_WIDTH       256u
+#define OUTPUT_HEIGHT      239u
+#define TEX_WIDTH          256u
+#define TEX_HEIGHT         256u
+#define ATLAS_SIZE         128u   /* 16 tiles x 8 px */
+#define ATLAS_TILES        16u
+#define ATLAS_SLOTS        256u
+#define ATLAS_HASH         2048u
 #define SC_VRAM_SIZE       65536u
 #define SC_CGRAM_SIZE      512u
-#define SC_OAM_SIZE        544u
 #define SC_CITY_MAP_WIDTH  120u
 #define SC_CITY_MAP_HEIGHT 100u
 #define SC_CITY_VIEW_X_OFFSET  0x01bdu
@@ -27,81 +34,126 @@
 #define SC_CITY_FINE_X_OFFSET  0x0139u
 #define SC_CITY_FINE_Y_OFFSET  0x0137u
 
-/* Render geometry — match the 3DS top screen (256×240 native, but SNES
-   visible area is 256×224 with borders). */
-#define OUTPUT_WIDTH       256u
-#define OUTPUT_HEIGHT      239u
-
-/* Texture must be power-of-two on PICA200 */
-#define TEX_WIDTH          256u
-#define TEX_HEIGHT         256u
-
-/* MMIO register offsets (relative to SC_MMIO_BASE = 0x2100) */
 #define MMIO_INIDISP  0x00u
-#define MMIO_BGMODE   0x05u
 #define MMIO_BG1SC    0x07u
 #define MMIO_BG2SC    0x08u
-#define MMIO_BG3SC    0x09u
-#define MMIO_BG4SC    0x0Au
 #define MMIO_BG12NB   0x0Bu
-#define MMIO_BG34NB   0x0Cu
 #define MMIO_TM       0x2Cu
-#define MMIO_TS       0x2Du
-#define MMIO_W34SEL   0x2Fu
-#define MMIO_CGWSel   0x30u
-#define MMIO_CGADSUB  0x31u
 
-/* Forward declaration — defined in 3ds_main.c */
-extern SimCityRecomp *g_recomp;
+/* ── Atlas ── */
+typedef struct {
+    uint32_t key;
+    uint16_t pixels[64];
+    bool     valid;
+    uint32_t used;
+} AtlasTile;
 
-/* ── Module state ── */
+typedef struct {
+    AtlasTile tiles[ATLAS_SLOTS];
+    uint16_t  hash[ATLAS_HASH];
+    uint32_t  frame;
+} Atlas;
+
+static Atlas s_atlas;
+
+/* ── GPU state ── */
 static C3D_RenderTarget *s_target = NULL;
-static C3D_Tex s_frame_tex;
-static bool s_gpu_ready = false;
+static C3D_Tex           s_frame_tex;
+static bool              s_gpu_ready = false;
+extern SimCityRecomp    *g_recomp;
 
-/* VRAM read (word-addressed) */
+/* ── Helpers ── */
 static inline uint8_t vram_read8(const uint8_t *vram, uint32_t byte_addr) {
     return vram[byte_addr & (SC_VRAM_SIZE - 1u)];
 }
-
 static uint16_t vram_read16(const uint8_t *vram, uint32_t word_addr) {
-    uint32_t byte_addr = word_addr << 1;
-    return (uint16_t)(vram[byte_addr & (SC_VRAM_SIZE - 1u)] |
-                      (vram[(byte_addr + 1u) & (SC_VRAM_SIZE - 1u)] << 8));
+    uint32_t ba = word_addr << 1;
+    return (uint16_t)(vram[ba & (SC_VRAM_SIZE - 1u)] |
+                      (vram[(ba + 1u) & (SC_VRAM_SIZE - 1u)] << 8));
 }
-
-/* Decode 2bpp pixel from 2 plane bytes */
 static inline uint8_t decode_2bpp(const uint8_t *planes, unsigned bit) {
     return (uint8_t)(((planes[0] >> bit) & 1u) |
                      (((planes[1] >> bit) & 1u) << 1));
 }
-
-/* Decode 4bpp pixel from 4 plane bytes */
-static inline uint8_t decode_4bpp(const uint8_t *planes, unsigned bit) {
-    return (uint8_t)(((planes[0] >> bit) & 1u) |
-                     (((planes[1] >> bit) & 1u) << 1) |
-                     (((planes[2] >> bit) & 1u) << 2) |
-                     (((planes[3] >> bit) & 1u) << 3));
-}
-
-/* Convert SNES CGRAM color (9-bit BBGR) to RGB565 */
 static uint16_t cgram_to_rgb565(uint16_t raw) {
     uint8_t r =  raw & 0x1Fu;
     uint8_t g = (raw >> 5) & 0x1Fu;
     uint8_t b = (raw >> 10) & 0x1Fu;
-    /* Expand 5-bit to 5-bit (same), 5-bit green to 6-bit */
     uint8_t g6 = (g << 1) | (g >> 4);
     return (uint16_t)((r << 11) | (g6 << 5) | b);
 }
 
-/* ── GPU init ── */
+/* ── Atlas hash ── */
+static uint32_t atlas_hash(uint32_t key) { return (key * 2654435761u) >> 11; }
 
+/* Returns slot index (>=0) or -1 on failure */
+static int atlas_decode(Atlas *a, const uint8_t *vram,
+                       uint32_t tile_idx, uint8_t pal_group, uint32_t char_base,
+                       uint8_t flip_x, uint8_t flip_y,
+                       const uint16_t *palette_lut) {
+    uint32_t key = tile_idx | ((uint32_t)pal_group << 10) | (char_base >> 8);
+    unsigned h = atlas_hash(key);
+    while (a->hash[h] && a->tiles[a->hash[h]].key != key)
+        h = (h + 1) & (ATLAS_HASH - 1);
+    unsigned slot = a->hash[h];
+
+    if (!slot) {
+        /* Find free slot (LRU) */
+        unsigned best = 1, best_frame = a->tiles[1].used;
+        for (unsigned i = 2; i < ATLAS_SLOTS; i++) {
+            if (!a->tiles[i].valid) { best = i; break; }
+            if (a->tiles[i].used < best_frame) { best = i; best_frame = a->tiles[i].used; }
+        }
+        slot = best;
+        if (a->tiles[slot].valid) {
+            uint32_t old_key = a->tiles[slot].key;
+            unsigned hh = atlas_hash(old_key);
+            while (a->hash[hh] && a->tiles[a->hash[hh]].key != old_key)
+                hh = (hh + 1) & (ATLAS_HASH - 1);
+            if (a->hash[hh]) a->hash[hh] = 0;
+        }
+        h = atlas_hash(key);
+        while (a->hash[h]) h = (h + 1) & (ATLAS_HASH - 1);
+        a->hash[h] = slot;
+        a->tiles[slot].valid = false;
+        a->tiles[slot].key = key;
+    }
+
+    AtlasTile *t = &a->tiles[slot];
+    t->used = a->frame;
+
+    if (t->valid) return (int)slot;
+
+    /* Decode 2bpp tile */
+    t->valid = true;
+    uint32_t row_addr_base = char_base + tile_idx * 16u;
+    for (unsigned py = 0; py < 8; py++) {
+        unsigned src_py = flip_y ? (7 - py) : py;
+        uint32_t row_addr = row_addr_base + src_py * 2u;
+        uint8_t planes[2] = { vram_read8(vram, row_addr),
+                              vram_read8(vram, row_addr + 1u) };
+        for (unsigned px = 0; px < 8; px++) {
+            unsigned src_px = flip_x ? (7 - px) : px;
+            uint8_t color = decode_2bpp(planes, 7u - src_px);
+            unsigned idx = py * 8 + px;
+            if (color) {
+                unsigned pal_idx = pal_group * 4u + color;
+                t->pixels[idx] = palette_lut[pal_idx & 127u];
+            } else {
+                t->pixels[idx] = 0;
+            }
+        }
+    }
+    return (int)slot;
+}
+
+/* ── GPU init ── */
 int ds3_render_native_init(void) {
     C3D_Init(C3D_DEFAULT_CMDBUF_SIZE);
 
     s_target = C3D_RenderTargetCreate(240, 400, GPU_RB_RGB565, GPU_RB_DEPTH24_STENCIL8);
     if (!s_target) {
-        printf("[native] RenderTargetCreate failed\n");
+        printf("[atlas] RenderTargetCreate failed\n");
         return -1;
     }
     C3D_RenderTargetSetOutput(s_target, GFX_TOP, GFX_LEFT,
@@ -111,120 +163,118 @@ int ds3_render_native_init(void) {
         GX_TRANSFER_SCALING(GX_TRANSFER_SCALE_NO));
 
     if (!C3D_TexInit(&s_frame_tex, TEX_WIDTH, TEX_HEIGHT, GPU_RGB565)) {
-        printf("[native] TexInit failed\n");
+        printf("[atlas] TexInit failed\n");
         return -1;
     }
     C3D_TexSetFilter(&s_frame_tex, GPU_NEAREST, GPU_NEAREST);
     C3D_TexSetWrap(&s_frame_tex, GPU_CLAMP_TO_EDGE, GPU_CLAMP_TO_EDGE);
 
+    memset(&s_atlas, 0, sizeof(s_atlas));
+
     s_gpu_ready = true;
-    printf("[native] GPU tile-render initialized (%ux%u)\n", OUTPUT_WIDTH, OUTPUT_HEIGHT);
+    printf("[atlas] GPU tile-render initialized\n");
     return 0;
 }
 
-/* ── Pre-assemble frame ── */
+/* ── Frame render ── */
+int ds3_render_native_frame(void) {
+    if (!s_gpu_ready || !g_recomp) return -1;
 
-/* Access the machine via the public accessor */
-struct SCMachine;  /* forward */
-
-static void assemble_frame_rgb565(const void *machine_ptr, uint16_t *out) {
-    /* The machine pointer is SCMachine* from the upstream core.
-     * We cast to a local struct definition matching the fields we need. */
-    struct {
-        uint32_t _pad0;
-        /* We need: vram[65536], cgram[512], oam[544], mmio[64], wram[131072] */
-        /* Offsets depend on SCMachine layout. Use accessor functions instead. */
-    } *m = (void *)machine_ptr;
-
-    /* Use public accessors for WRAM (camera) and raw access for the rest.
-     * Since the 3DS port includes the internal headers, we can cast properly. */
-    (void)m;
-
-    /* Read WRAM for camera */
-    int16_t city_view_x, city_view_y, fine_x, fine_y;
-
+    /* Read camera */
     uint8_t wram_x[2], wram_y[2], wram_fx[1], wram_fy[1];
     simcity_recomp_read_wram(g_recomp, SC_CITY_VIEW_X_OFFSET, wram_x, 2);
     simcity_recomp_read_wram(g_recomp, SC_CITY_VIEW_Y_OFFSET, wram_y, 2);
-    simcity_recomp_read_wram(g_recomp, SC_CITY_FINE_X_OFFSET, &wram_fx, 1);
-    simcity_recomp_read_wram(g_recomp, SC_CITY_FINE_Y_OFFSET, &wram_fy, 1);
+    simcity_recomp_read_wram(g_recomp, SC_CITY_FINE_X_OFFSET, wram_fx, 1);
+    simcity_recomp_read_wram(g_recomp, SC_CITY_FINE_Y_OFFSET, wram_fy, 1);
 
-    city_view_x = (int16_t)(wram_x[0] | (wram_x[1] << 8));
-    city_view_y = (int16_t)(wram_y[0] | (wram_y[1] << 8));
-    fine_x = wram_fx[0] & 7;
-    fine_y = wram_fy[0] & 7;
+    int city_view_x = (int16_t)(wram_x[0] | (wram_x[1] << 8));
+    int city_view_y = (int16_t)(wram_y[0] | (wram_y[1] << 8));
+    int fine_x = wram_fx[0] & 7;
+    int fine_y = wram_fy[0] & 7;
 
-    int native_cam_x = (int)city_view_x * 8 + (int)fine_x;
-    int native_cam_y = (int)city_view_y * 8 + (int)fine_y;
+    int native_cam_x = city_view_x * 8 + fine_x;
+    int native_cam_y = city_view_y * 8 + fine_y;
 
     /* Read PPU registers */
     uint8_t mmio[64];
     simcity_recomp_read_mmio(g_recomp, 0, mmio, 64);
 
-    uint8_t bgmode_reg   = mmio[MMIO_BGMODE];
-    uint8_t bg1sc        = mmio[MMIO_BG1SC];
-    uint8_t bg2sc        = mmio[MMIO_BG2SC];
+    uint8_t bg1sc = mmio[MMIO_BG1SC];
+    uint8_t bg2sc = mmio[MMIO_BG2SC];
+    uint8_t tm    = mmio[MMIO_TM];
+    uint8_t inidisp = mmio[MMIO_INIDISP];
+
     uint16_t bg12nba;
     {
         uint8_t tmp[2];
         simcity_recomp_read_mmio(g_recomp, MMIO_BG12NB, tmp, 2);
         bg12nba = (uint16_t)(tmp[0] | (tmp[1] << 8));
     }
-    uint8_t tm           = mmio[MMIO_TM];
-    uint8_t inidisp      = mmio[MMIO_INIDISP];
 
-    unsigned mode = bgmode_reg & 7u;
-    (void)mode;  /* SimCity always uses mode 0 or 1 */
-
-    uint8_t bg3high = bgmode_reg & 8u;
-    (void)bg3high;
-
-    /* Tilemap base addresses (VRAM word indices) */
-    uint32_t bg1_tm_base = (uint32_t)(bg1sc & 0x03u) << 10u;  /* ×0x400 bytes = ×0x800 words */
-    uint32_t bg2_tm_base = (uint32_t)(bg2sc & 0x03u) << 10u;
-
-    /* Pattern base addresses */
-    uint32_t bg1_char_base = (uint32_t)(bg12nba & 0x0Fu) << 12u;  /* <<13 bytes = <<12 words */
+    uint32_t bg1_tm_base   = (uint32_t)(bg1sc & 0x03u) << 10u;
+    uint32_t bg2_tm_base   = (uint32_t)(bg2sc & 0x03u) << 10u;
+    uint32_t bg1_char_base = (uint32_t)(bg12nba & 0x0Fu) << 12u;
     uint32_t bg2_char_base = (uint32_t)((bg12nba >> 4u) & 0x0Fu) << 12u;
 
-    /* Read VRAM + CGRAM into local buffers (one bulk read) */
-    uint8_t vram[SC_VRAM_SIZE];
-    uint8_t cgram[SC_CGRAM_SIZE];
+    /* Read VRAM + CGRAM */
+    static uint8_t vram[SC_VRAM_SIZE];
+    static uint8_t cgram[SC_CGRAM_SIZE];
     simcity_recomp_read_vram(g_recomp, 0, vram, SC_VRAM_SIZE);
     simcity_recomp_read_cgram(g_recomp, 0, cgram, SC_CGRAM_SIZE);
 
-    /* Build palette LUT: 128 entries from CGRAM (2 bytes each) */
-    uint16_t palette_lut[128];
-    unsigned pi;
-    for (pi = 0; pi < 128; ++pi) {
+    /* Build palette LUT */
+    static uint16_t palette_lut[128];
+    for (unsigned pi = 0; pi < 128; ++pi)
         palette_lut[pi] = cgram_to_rgb565((uint16_t)(cgram[pi*2] | (cgram[pi*2+1] << 8)));
+
+    s_atlas.frame++;
+
+    /* Forced blank */
+    if (inidisp & 0x80u) {
+        memset(s_frame_tex.data, 0, TEX_WIDTH * TEX_HEIGHT * 2);
+        C3D_TexUpload(&s_frame_tex, s_frame_tex.data);
+        C3D_FrameBegin(C3D_FRAME_SYNCDRAW);
+        C3D_FrameDrawOn(s_target);
+        C3D_RenderTargetClear(s_target, C3D_CLEAR_COLOR, 0, 0);
+        /* render tex as fullscreen quad */
+        C3D_TexBind(0, &s_frame_tex);
+        C3D_ImmDrawBegin(GPU_TRIANGLE_STRIP);
+        C3D_ImmSendAttrib(-1.0f, -1.0f, 0.5f, 0.0f);
+        C3D_ImmSendAttrib(0.0f, 0.0f, 0.0f, 0.0f);
+        C3D_ImmSendAttrib( 1.0f, -1.0f, 0.5f, 1.0f);
+        C3D_ImmSendAttrib(1.0f, 0.0f, 0.0f, 0.0f);
+        C3D_ImmSendAttrib(-1.0f,  1.0f, 0.5f, 0.0f);
+        C3D_ImmSendAttrib(0.0f, 1.0f, 0.0f, 0.0f);
+        C3D_ImmSendAttrib( 1.0f,  1.0f, 0.5f, 1.0f);
+        C3D_ImmSendAttrib(1.0f, 1.0f, 0.0f, 0.0f);
+        C3D_ImmDrawEnd();
+        C3D_FrameEnd(0);
+        return 1;
     }
 
-    /* For each output pixel, decode the tile pixel from the correct layer.
-     * BG2 (terrain) is drawn first, BG1 (buildings) on top. */
-    unsigned y, x;
+    /* Pre-assemble frame into texture using atlas */
+    memset(s_frame_tex.data, 0, TEX_WIDTH * TEX_HEIGHT * 2);
+
     int max_map_x = SC_CITY_MAP_WIDTH - 1;
     int max_map_y = SC_CITY_MAP_HEIGHT - 1;
 
-    for (y = 0; y < OUTPUT_HEIGHT; ++y) {
-        uint16_t *row = &out[y * TEX_WIDTH];
+    for (unsigned y = 0; y < OUTPUT_HEIGHT; ++y) {
+        uint16_t *row = &((uint16_t *)s_frame_tex.data)[y * TEX_WIDTH];
         int world_y = native_cam_y + (int)y;
         int map_y_raw = world_y >> 3;
         int eff_cell_y = world_y & 7;
 
-        for (x = 0; x < OUTPUT_WIDTH; ++x) {
+        for (unsigned x = 0; x < OUTPUT_WIDTH; ++x) {
             int world_x = native_cam_x + (int)x;
             int map_x = world_x >> 3;
             int cell_x = world_x & 7;
 
-            uint16_t pixel = 0;  /* default: color 0 (black/transparent) */
+            uint16_t pixel = 0;
 
-            /* BG2 (city terrain) */
+            /* BG2 (terrain) */
             if (tm & 0x04u) {
                 if (map_x >= 0 && map_x <= max_map_x &&
                     map_y_raw >= 0 && map_y_raw <= max_map_y) {
-
-                    /* Read tilemap entry (16-bit) */
                     uint32_t tm_addr = bg2_tm_base + ((uint32_t)map_y_raw * 64u + (uint32_t)(unsigned)map_x) * 2u;
                     uint16_t entry = vram_read16(vram, tm_addr >> 1);
                     uint16_t tile = entry & 0x03FFu;
@@ -235,24 +285,19 @@ static void assemble_frame_rgb565(const void *machine_ptr, uint16_t *out) {
                     int eff_px = flip_x ? (7 - cell_x) : cell_x;
                     int eff_py = flip_y ? (7 - eff_cell_y) : eff_cell_y;
 
-                    /* 2bpp tile: 2 bytes per row */
-                    uint32_t row_addr = bg2_char_base + tile * 16u + (uint32_t)eff_py * 2u;
-                    uint8_t planes[2] = { vram_read8(vram, row_addr),
-                                          vram_read8(vram, row_addr + 1u) };
-                    uint8_t color = decode_2bpp(planes, 7u - (unsigned)eff_px);
-
-                    if (color) {
-                        unsigned pal_idx = pal_group * 4u + color;
-                        pixel = palette_lut[pal_idx & 127u];
+                    int slot = atlas_decode(&s_atlas, vram, tile, pal_group, bg2_char_base,
+                                           flip_x, flip_y, palette_lut);
+                    if (slot >= 0) {
+                        uint16_t tp = s_atlas.tiles[slot].pixels[eff_py * 8 + eff_px];
+                        if (tp) pixel = tp;
                     }
                 }
             }
 
-            /* BG1 (city buildings/overlay) — drawn on top */
+            /* BG1 (buildings) on top */
             if (tm & 0x02u) {
                 if (map_x >= 0 && map_x <= max_map_x &&
                     map_y_raw >= 0 && map_y_raw <= max_map_y) {
-
                     uint32_t tm_addr = bg1_tm_base + ((uint32_t)map_y_raw * 64u + (uint32_t)(unsigned)map_x) * 2u;
                     uint16_t entry = vram_read16(vram, tm_addr >> 1);
                     uint16_t tile = entry & 0x03FFu;
@@ -263,14 +308,11 @@ static void assemble_frame_rgb565(const void *machine_ptr, uint16_t *out) {
                     int eff_px = flip_x ? (7 - cell_x) : cell_x;
                     int eff_py = flip_y ? (7 - eff_cell_y) : eff_cell_y;
 
-                    uint32_t row_addr = bg1_char_base + tile * 16u + (uint32_t)eff_py * 2u;
-                    uint8_t planes[2] = { vram_read8(vram, row_addr),
-                                          vram_read8(vram, row_addr + 1u) };
-                    uint8_t color = decode_2bpp(planes, 7u - (unsigned)eff_px);
-
-                    if (color) {
-                        unsigned pal_idx = pal_group * 4u + color;
-                        pixel = palette_lut[pal_idx & 127u];
+                    int slot = atlas_decode(&s_atlas, vram, tile, pal_group, bg1_char_base,
+                                           flip_x, flip_y, palette_lut);
+                    if (slot >= 0) {
+                        uint16_t tp = s_atlas.tiles[slot].pixels[eff_py * 8 + eff_px];
+                        if (tp) pixel = tp;
                     }
                 }
             }
@@ -279,37 +321,16 @@ static void assemble_frame_rgb565(const void *machine_ptr, uint16_t *out) {
         }
     }
 
-    /* Handle forced blank */
-    if (inidisp & 0x80u) {
-        for (y = 0; y < OUTPUT_HEIGHT; ++y)
-            for (x = 0; x < OUTPUT_WIDTH; ++x)
-                out[y * TEX_WIDTH + x] = 0;
-    }
-}
+    /* Upload texture */
+    C3D_TexUpload(&s_frame_tex, s_frame_tex.data);
 
-/* ── Frame render ── */
-
-int ds3_render_native_frame(void) {
-    if (!s_gpu_ready || !g_recomp) return -1;
-
-    const void *machine = simcity_recomp_machine(g_recomp);
-    if (!machine) return -1;
-
-    /* Pre-assemble frame into texture buffer */
-    static uint16_t tex_data[TEX_WIDTH * TEX_HEIGHT];
-    memset(tex_data, 0, sizeof(tex_data));
-    assemble_frame_rgb565(machine, tex_data);
-
-    /* Upload to GPU */
-    C3D_TexUpload(&s_frame_tex, tex_data);
-    C3D_TexBind(0, &s_frame_tex);
-
-    /* Render fullscreen quad on the top screen */
+    /* Render fullscreen quad */
     C3D_FrameBegin(C3D_FRAME_SYNCDRAW);
     C3D_FrameDrawOn(s_target);
+    C3D_RenderTargetClear(s_target, C3D_CLEAR_COLOR, 0, 0);
 
+    C3D_TexBind(0, &s_frame_tex);
     C3D_ImmDrawBegin(GPU_TRIANGLE_STRIP);
-    /* Vertex: x, y, z | u, v */
     C3D_ImmSendAttrib(-1.0f, -1.0f, 0.5f, 0.0f);
     C3D_ImmSendAttrib(0.0f, 0.0f, 0.0f, 0.0f);
     C3D_ImmSendAttrib( 1.0f, -1.0f, 0.5f, 1.0f);
@@ -324,6 +345,7 @@ int ds3_render_native_frame(void) {
     return 1;
 }
 
+/* ── Exit ── */
 void ds3_render_native_exit(void) {
     C3D_TexDelete(&s_frame_tex);
     if (s_target) C3D_RenderTargetDelete(s_target);

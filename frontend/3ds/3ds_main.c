@@ -614,6 +614,7 @@ static void ds3_dbg_state(char *buf, unsigned capacity) {
     unsigned        frame = 0u, fw = 0u, fh = 0u;
     unsigned long long instr = 0ull, master = 0ull;
     unsigned        rch = 0u, rcm = 0u;
+    uint32_t        dtiles = 0u, ttiles = 0u;
     const void     *src = NULL;
     const char     *err = "no-instance";
     /* First 16 hex chars of the frame digest. Named fhash, not fh: fh is the
@@ -634,6 +635,7 @@ static void ds3_dbg_state(char *buf, unsigned capacity) {
             /* simcity_recomp_render_cache_stats not available; set to 0 */
             rch = 0; rcm = 0;
         }
+        simcity_recomp_dirty_stats(g_recomp, &dtiles, &ttiles);
         {
             const char *h = simcity_recomp_frame_bgr555_sha256(g_recomp);
             /* All zeros means no frame has been hashed yet, or logging is off
@@ -649,7 +651,7 @@ static void ds3_dbg_state(char *buf, unsigned capacity) {
              "input=0x%04X injected=0x%04X chan=%d rot=%d "
              "build=" DS3_BUILD_ID " mode=%d hud=%d adv=%u core=%u render=%u hudus=%u "
              "audio=%u dbg=%u present=%u loop=%u ftp=%d fh=%.16s "
-             "instr_frame=%llu rc=%u rch=%u rcm=%u last_error=%s",
+             "instr_frame=%llu rc=%u rch=%u rcm=%u dt=%u/%u last_error=%s",
              frame, src, fw, fh, instr, master,
              (unsigned)g_last_input, (unsigned)g_dbg_input,
              g_dbg_chan_swap, g_dbg_rotate_mode, g_dbg_advance_mode, g_dbg_hud,
@@ -662,7 +664,7 @@ static void ds3_dbg_state(char *buf, unsigned capacity) {
              (unsigned)g_dbg_phase_us[DBGK_PHASE_PRESENT],
              (unsigned)g_dbg_phase_us[DBGK_PHASE_LOOP], g_ftp_listen_fd, fhash,
              (unsigned long long)g_instr_per_frame,
-             sc_core_get_render_cache_enabled() ? 1u : 0u, rch, rcm, err);
+             sc_core_get_render_cache_enabled() ? 1u : 0u, rch, rcm, dtiles, ttiles, err);
 }
 
 /* Brings up the debug bridge and FTP server. Called at boot and then about once

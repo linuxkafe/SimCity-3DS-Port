@@ -40,6 +40,10 @@
 extern int sc_core_logging_enabled(void);
 extern int sc_core_get_skip_analyze(void);
 extern void sc_core_set_skip_analyze(int skip);
+extern unsigned sc_core_get_render_skip(void);
+extern void sc_core_set_render_skip(unsigned flags);
+extern unsigned sc_core_get_render_cache_enabled(void);
+extern void sc_core_set_render_cache_enabled(unsigned enabled);
 
 #include <3ds.h>
 #include <stdio.h>
@@ -514,14 +518,16 @@ static void dbgk_ext(const char *line) {
            core's API for a diagnostic that only the harness needs. */
         char m[224];
         snprintf(m, sizeof(m),
-                 "OK 3dsdbgkit/2 build=%s breaks=%d ftp_listen=%d ftp_errno=%d cclog=%d anlz=%d\n",
+                 "OK 3dsdbgkit/2 build=%s breaks=%d ftp_listen=%d ftp_errno=%d cclog=%d anlz=%d rskip=%u cache=%u\n",
                  DS3_BUILD_ID, g_break_count, g_ftp_listen_fd, g_ftp_last_error,
                  sc_core_logging_enabled() ? 1 : 0,
-                 sc_core_get_skip_analyze() ? 0 : 1);
+                 sc_core_get_skip_analyze() ? 0 : 1,
+                 sc_core_get_render_skip(),
+                 sc_core_get_render_cache_enabled() ? 1u : 0u);
         dbgk_send_str(m);
     } else if (!strcmp(verb, "state")) {
         if (!g_state_fn) { dbgk_send_str("ERR nostate\n"); return; }
-        char buf[256];
+        char buf[512];
         g_state_fn(buf, (unsigned)sizeof(buf));
         dbgk_send_str("OK ");
         dbgk_send_str(buf);
@@ -554,6 +560,26 @@ static void dbgk_ext(const char *line) {
         sc_core_set_skip_analyze(on ? 0 : 1);
         dbgk_send_str(on ? "OK anlz=1 analyze=running\n"
                          : "OK anlz=0 analyze=skipped\n");
+    } else if (!strcmp(verb, "rskip")) {
+        /* Render-subsystem bisect switch. Bits match SC_RENDER_SKIP_* in the
+           core: 1=subscreen, 2=BG layers, 4=sprites, 8=BGRA output.
+           Default 0 = unchanged render. Diagnostic only. */
+        unsigned flags = 0u;
+        if (sscanf(line, "%*s %u", &flags) != 1) { dbgk_send_str("ERR args\n"); return; }
+        sc_core_set_render_skip(flags);
+        char m[48];
+        snprintf(m, sizeof(m), "OK rskip=%u\n", sc_core_get_render_skip());
+        dbgk_send_str(m);
+    } else if (!strcmp(verb, "nocache")) {
+        /* Render-frame-cache A/B switch (T070). on=0 disables the cache so the
+           same build can measure cache-on and cache-off in one session on one
+           game state. The cache is byte-identical by gate
+           tools/gate-t070-render-cache.sh; this switch exists to prove the
+           speed difference, not the correctness. */
+        int on = 0;
+        if (sscanf(line, "%*s %d", &on) != 1) { dbgk_send_str("ERR args\n"); return; }
+        sc_core_set_render_cache_enabled(on ? 1u : 0u);
+        dbgk_send_str(on ? "OK cache=1\n" : "OK cache=0\n");
     } else if (!strcmp(verb, "cclog")) {
         /* Toggles the CORE's log handle, not the frontend trace.
            This is not a convenience verb. sc_core_logging_enabled() is just
