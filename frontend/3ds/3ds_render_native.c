@@ -13,6 +13,7 @@
 
 #include <3ds.h>
 #include <citro3d.h>
+#include "vshader_shbin.h"
 #include <string.h>
 #include <stdio.h>
 
@@ -61,6 +62,10 @@ static C3D_RenderTarget *s_target = NULL;
 static C3D_Tex           s_frame_tex;
 static uint16_t         *s_tex_buf = NULL;
 static bool              s_gpu_ready = false;
+static DVLB_s           *s_shader = NULL;
+static shaderProgram_s   s_shaderProgram;
+static C3D_AttrInfo     s_attrInfo;
+static int              s_projLocation = -1;
 extern SimCityRecomp    *g_recomp;
 
 /* ── Helpers ── */
@@ -159,7 +164,7 @@ int ds3_render_native_init(void) {
     }
     C3D_RenderTargetSetOutput(s_target, GFX_TOP, GFX_LEFT,
         GX_TRANSFER_FLIP_VERT(0) | GX_TRANSFER_OUT_TILED(0) |
-        GX_TRANSFER_IN_FORMAT(GX_TRANSFER_FMT_RGBA8) |
+        GX_TRANSFER_IN_FORMAT(GX_TRANSFER_FMT_RGB565) |
         GX_TRANSFER_OUT_FORMAT(GX_TRANSFER_FMT_RGB8) |
         GX_TRANSFER_SCALING(GX_TRANSFER_SCALE_NO));
 
@@ -169,6 +174,31 @@ int ds3_render_native_init(void) {
     }
     C3D_TexSetFilter(&s_frame_tex, GPU_NEAREST, GPU_NEAREST);
     C3D_TexSetWrap(&s_frame_tex, GPU_CLAMP_TO_EDGE, GPU_CLAMP_TO_EDGE);
+
+    /* Load vertex shader */
+    s_shader = DVLB_ParseFile((u32 *)vshader_shbin, vshader_shbin_size);
+    if (!s_shader || !s_shader->numDVLE) {
+        printf("[native] DVLB_ParseFile failed\n");
+        return -1;
+    }
+    if (R_FAILED(shaderProgramInit(&s_shaderProgram))) {
+        printf("[native] shaderProgramInit failed\n");
+        return -1;
+    }
+    if (R_FAILED(shaderProgramSetVsh(&s_shaderProgram, &s_shader->DVLE[0]))) {
+        printf("[native] shaderProgramSetVsh failed\n");
+        return -1;
+    }
+    s_projLocation = shaderInstanceGetUniformLocation(s_shaderProgram.vertexShader, "projection");
+    if (s_projLocation < 0) {
+        printf("[native] projection uniform not found\n");
+        return -1;
+    }
+
+    /* Set up attribute info: position (3 floats) + texcoord (2 floats) */
+    AttrInfo_Init(&s_attrInfo);
+    AttrInfo_AddLoader(&s_attrInfo, 0, GPU_FLOAT, 3);  /* position */
+    AttrInfo_AddLoader(&s_attrInfo, 1, GPU_FLOAT, 2);  /* texcoord */
 
     s_tex_buf = (uint16_t *)linearAlloc(TEX_WIDTH * TEX_HEIGHT * 2);
     if (!s_tex_buf) {
@@ -255,7 +285,7 @@ int ds3_render_native_frame(void) {
         C3D_ImmSendAttrib( 1.0f,  1.0f, 0.5f, 1.0f);
         C3D_ImmSendAttrib(1.0f, 1.0f, 0.0f, 0.0f);
         C3D_ImmDrawEnd();
-        C3D_FrameEnd(0);
+        C3D_FrameEnd(GX_CMDLIST_FLUSH);
         return 1;
     }
 
@@ -357,27 +387,17 @@ int ds3_render_native_frame(void) {
     /* Render fullscreen quad */
     C3D_FrameBegin(C3D_FRAME_SYNCDRAW);
     C3D_FrameDrawOn(s_target);
-    C3D_RenderTargetClear(s_target, C3D_CLEAR_COLOR, 0, 0);
+    C3D_RenderTargetClear(s_target, C3D_CLEAR_COLOR, 0x0000FFFF, 0);  /* Yellow test */
 
-    C3D_TexBind(0, &s_frame_tex);
-    C3D_ImmDrawBegin(GPU_TRIANGLE_STRIP);
-    C3D_ImmSendAttrib(-1.0f, -1.0f, 0.5f, 0.0f);
-    C3D_ImmSendAttrib(0.0f, 0.0f, 0.0f, 0.0f);
-    C3D_ImmSendAttrib( 1.0f, -1.0f, 0.5f, 1.0f);
-    C3D_ImmSendAttrib(1.0f, 0.0f, 0.0f, 0.0f);
-    C3D_ImmSendAttrib(-1.0f,  1.0f, 0.5f, 0.0f);
-    C3D_ImmSendAttrib(0.0f, 1.0f, 0.0f, 0.0f);
-    C3D_ImmSendAttrib( 1.0f,  1.0f, 0.5f, 1.0f);
-    C3D_ImmSendAttrib(1.0f, 1.0f, 0.0f, 0.0f);
-    C3D_ImmDrawEnd();
-
-    C3D_FrameEnd(0);
+    C3D_FrameEnd(GX_CMDLIST_FLUSH);
     return 1;
 }
 
 /* ── Exit ── */
 void ds3_render_native_exit(void) {
     if (s_tex_buf) linearFree(s_tex_buf);
+    if (s_shader) DVLB_Free(s_shader);
+    shaderProgramFree(&s_shaderProgram);
     C3D_TexDelete(&s_frame_tex);
     if (s_target) C3D_RenderTargetDelete(s_target);
     C3D_Fini();
