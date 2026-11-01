@@ -59,6 +59,7 @@ static Atlas s_atlas;
 /* ── GPU state ── */
 static C3D_RenderTarget *s_target = NULL;
 static C3D_Tex           s_frame_tex;
+static uint16_t         *s_tex_buf = NULL;
 static bool              s_gpu_ready = false;
 extern SimCityRecomp    *g_recomp;
 
@@ -169,6 +170,11 @@ int ds3_render_native_init(void) {
     C3D_TexSetFilter(&s_frame_tex, GPU_NEAREST, GPU_NEAREST);
     C3D_TexSetWrap(&s_frame_tex, GPU_CLAMP_TO_EDGE, GPU_CLAMP_TO_EDGE);
 
+    s_tex_buf = (uint16_t *)linearAlloc(TEX_WIDTH * TEX_HEIGHT * 2);
+    if (!s_tex_buf) {
+        printf("[native] linearAlloc failed\n");
+        return -1;
+    }
     memset(&s_atlas, 0, sizeof(s_atlas));
 
     s_gpu_ready = true;
@@ -231,8 +237,9 @@ int ds3_render_native_frame(void) {
 
     /* Forced blank */
     if (inidisp & 0x80u) {
-        memset(s_frame_tex.data, 0, TEX_WIDTH * TEX_HEIGHT * 2);
-        C3D_TexUpload(&s_frame_tex, s_frame_tex.data);
+        memset(s_tex_buf, 0, TEX_WIDTH * TEX_HEIGHT * 2);
+        memcpy(s_frame_tex.data, s_tex_buf, TEX_WIDTH * TEX_HEIGHT * 2);
+        C3D_TexUpload(&s_frame_tex, s_tex_buf);
         C3D_FrameBegin(C3D_FRAME_SYNCDRAW);
         C3D_FrameDrawOn(s_target);
         C3D_RenderTargetClear(s_target, C3D_CLEAR_COLOR, 0, 0);
@@ -252,14 +259,14 @@ int ds3_render_native_frame(void) {
         return 1;
     }
 
-    /* Pre-assemble frame into texture using atlas */
-    memset(s_frame_tex.data, 0, TEX_WIDTH * TEX_HEIGHT * 2);
+    /* Pre-assemble frame into texture */
+    memset(s_tex_buf, 0, TEX_WIDTH * TEX_HEIGHT * 2);
 
     int max_map_x = SC_CITY_MAP_WIDTH - 1;
     int max_map_y = SC_CITY_MAP_HEIGHT - 1;
 
     for (unsigned y = 0; y < OUTPUT_HEIGHT; ++y) {
-        uint16_t *row = &((uint16_t *)s_frame_tex.data)[y * TEX_WIDTH];
+        uint16_t *row = &s_tex_buf[y * TEX_WIDTH];
         int world_y = native_cam_y + (int)y;
         int map_y_raw = world_y >> 3;
         int eff_cell_y = world_y & 7;
@@ -344,7 +351,8 @@ int ds3_render_native_frame(void) {
     }
 
     /* Upload texture */
-    C3D_TexUpload(&s_frame_tex, s_frame_tex.data);
+    memcpy(s_frame_tex.data, s_tex_buf, TEX_WIDTH * TEX_HEIGHT * 2);
+    C3D_TexUpload(&s_frame_tex, s_tex_buf);
 
     /* Render fullscreen quad */
     C3D_FrameBegin(C3D_FRAME_SYNCDRAW);
@@ -369,6 +377,7 @@ int ds3_render_native_frame(void) {
 
 /* ── Exit ── */
 void ds3_render_native_exit(void) {
+    if (s_tex_buf) linearFree(s_tex_buf);
     C3D_TexDelete(&s_frame_tex);
     if (s_target) C3D_RenderTargetDelete(s_target);
     C3D_Fini();
