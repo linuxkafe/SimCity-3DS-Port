@@ -285,11 +285,22 @@ int ds3_render_native_frame(void) {
                     int eff_px = flip_x ? (7 - cell_x) : cell_x;
                     int eff_py = flip_y ? (7 - eff_cell_y) : eff_cell_y;
 
-                    int slot = atlas_decode(&s_atlas, vram, tile, pal_group, bg2_char_base,
-                                           flip_x, flip_y, palette_lut);
-                    if (slot >= 0) {
-                        uint16_t tp = s_atlas.tiles[slot].pixels[eff_py * 8 + eff_px];
-                        if (tp) pixel = tp;
+                    /* Direct tile decode (no atlas cache) */
+                    {
+                        uint32_t row_addr_base = bg2_char_base + tile * 16u;
+                        uint8_t planes[2];
+                        unsigned src_py = flip_y ? (7 - eff_cell_y) : eff_cell_y;
+                        uint32_t row_addr = row_addr_base + src_py * 2u;
+                        planes[0] = vram[row_addr & (SC_VRAM_SIZE - 1u)];
+                        planes[1] = vram[(row_addr + 1u) & (SC_VRAM_SIZE - 1u)];
+                        unsigned src_px = flip_x ? (7 - cell_x) : cell_x;
+                        uint8_t color = (uint8_t)(((planes[0] >> (7 - src_px)) & 1u) |
+                                                  (((planes[1] >> (7 - src_px)) & 1u) << 1));
+                        if (color) {
+                            unsigned pal_idx = pal_group * 4u + color;
+                            uint16_t tp = palette_lut[pal_idx & 127u];
+                            if (tp) pixel = tp;
+                        }
                     }
                 }
             }
@@ -308,11 +319,22 @@ int ds3_render_native_frame(void) {
                     int eff_px = flip_x ? (7 - cell_x) : cell_x;
                     int eff_py = flip_y ? (7 - eff_cell_y) : eff_cell_y;
 
-                    int slot = atlas_decode(&s_atlas, vram, tile, pal_group, bg1_char_base,
-                                           flip_x, flip_y, palette_lut);
-                    if (slot >= 0) {
-                        uint16_t tp = s_atlas.tiles[slot].pixels[eff_py * 8 + eff_px];
-                        if (tp) pixel = tp;
+                    /* Direct tile decode (no atlas cache) */
+                    {
+                        uint32_t row_addr_base = bg1_char_base + tile * 16u;
+                        uint8_t planes[2];
+                        unsigned src_py = flip_y ? (7 - eff_cell_y) : eff_cell_y;
+                        uint32_t row_addr = row_addr_base + src_py * 2u;
+                        planes[0] = vram[row_addr & (SC_VRAM_SIZE - 1u)];
+                        planes[1] = vram[(row_addr + 1u) & (SC_VRAM_SIZE - 1u)];
+                        unsigned src_px = flip_x ? (7 - cell_x) : cell_x;
+                        uint8_t color = (uint8_t)(((planes[0] >> (7 - src_px)) & 1u) |
+                                                  (((planes[1] >> (7 - src_px)) & 1u) << 1));
+                        if (color) {
+                            unsigned pal_idx = pal_group * 4u + color;
+                            uint16_t tp = palette_lut[pal_idx & 127u];
+                            if (tp) pixel = tp;
+                        }
                     }
                 }
             }
