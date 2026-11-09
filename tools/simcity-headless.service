@@ -1,0 +1,18 @@
+[Unit]
+Description=SimCity 3DS - headless Azahar (T041) with the T061 port build
+After=default.target
+
+[Service]
+Type=simple
+WorkingDirectory=%h/simcity-test
+Environment=XDG_RUNTIME_DIR=/run/user/1000
+Environment=LANG=C.UTF-8
+Environment=LC_ALL=C.UTF-8
+ExecStart=%h/simcity-test/simcity-headless --max-seconds 0 %h/simcity-test/simcity_t060_sched.3dsx
+StandardOutput=append:%h/simcity-test/headless_unit.log
+StandardError=append:%h/simcity-test/headless_unit.log
+Restart=always
+RestartSec=2
+
+[Install]
+WantedBy=default.target

@@ -1,3 +1,0 @@
-src_width=256
-src_height=239
-rotate_mode=-1

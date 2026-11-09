@@ -270,6 +270,8 @@ int ds3_render_native_frame(void) {
         C3D_FrameDrawOn(s_target);
         C3D_RenderTargetClear(s_target, C3D_CLEAR_COLOR, 0, 0);
         /* render tex as fullscreen quad */
+        C3D_BindProgram(&s_shaderProgram);
+        C3D_SetAttrInfo(&s_attrInfo);
         C3D_TexBind(0, &s_frame_tex);
         C3D_ImmDrawBegin(GPU_TRIANGLE_STRIP);
         C3D_ImmSendAttrib(-1.0f, -1.0f, 0.5f, 0.0f);
@@ -384,7 +386,26 @@ int ds3_render_native_frame(void) {
     /* Render fullscreen quad */
     C3D_FrameBegin(0);
     C3D_FrameDrawOn(s_target);
-    C3D_RenderTargetClear(s_target, C3D_CLEAR_COLOR, 0x0000FFFF, 0);  /* Yellow test */
+    C3D_RenderTargetClear(s_target, C3D_CLEAR_COLOR, 0, 0);
+
+    C3D_BindProgram(&s_shaderProgram);
+    C3D_SetAttrInfo(&s_attrInfo);
+    C3D_FVUnifSet(GPU_VERTEX_SHADER, s_projLocation + 0, 1.0f, 0.0f, 0.0f, 0.0f);
+    C3D_FVUnifSet(GPU_VERTEX_SHADER, s_projLocation + 1, 0.0f, 1.0f, 0.0f, 0.0f);
+    C3D_FVUnifSet(GPU_VERTEX_SHADER, s_projLocation + 2, 0.0f, 0.0f, 1.0f, 0.0f);
+    C3D_FVUnifSet(GPU_VERTEX_SHADER, s_projLocation + 3, 0.0f, 0.0f, 0.0f, 1.0f);
+
+    C3D_TexBind(0, &s_frame_tex);
+    C3D_ImmDrawBegin(GPU_TRIANGLE_STRIP);
+    C3D_ImmSendAttrib(-1.0f, -1.0f, 0.5f, 0.0f);
+    C3D_ImmSendAttrib(0.0f, 0.0f, 0.0f, 0.0f);
+    C3D_ImmSendAttrib( 1.0f, -1.0f, 0.5f, 1.0f);
+    C3D_ImmSendAttrib(1.0f, 0.0f, 0.0f, 0.0f);
+    C3D_ImmSendAttrib(-1.0f,  1.0f, 0.5f, 0.0f);
+    C3D_ImmSendAttrib(0.0f, 1.0f, 0.0f, 0.0f);
+    C3D_ImmSendAttrib( 1.0f,  1.0f, 0.5f, 1.0f);
+    C3D_ImmSendAttrib(1.0f, 1.0f, 0.0f, 0.0f);
+    C3D_ImmDrawEnd();
 
     C3D_FrameEnd(GX_CMDLIST_FLUSH);
     gfxFlushBuffers();
