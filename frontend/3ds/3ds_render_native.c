@@ -14,6 +14,7 @@
 #include <3ds.h>
 #include <citro3d.h>
 #include "vshader_shbin.h"
+#include <3ds/gfx.h>
 #include <string.h>
 #include <stdio.h>
 
@@ -59,6 +60,7 @@ static Atlas s_atlas;
 
 /* ── GPU state ── */
 static C3D_RenderTarget *s_target = NULL;
+static C3D_Tex           s_target_tex;
 static C3D_Tex           s_frame_tex;
 static uint16_t         *s_tex_buf = NULL;
 static bool              s_gpu_ready = false;
@@ -157,17 +159,11 @@ static int atlas_decode(Atlas *a, const uint8_t *vram,
 int ds3_render_native_init(void) {
     C3D_Init(C3D_DEFAULT_CMDBUF_SIZE);
 
-    s_target = C3D_RenderTargetCreate(240, 400, GPU_RB_RGB565, GPU_RB_DEPTH24_STENCIL8);
-    if (!s_target) {
-        printf("[atlas] RenderTargetCreate failed\n");
-        return -1;
-    }
-    C3D_RenderTargetSetOutput(s_target, GFX_TOP, GFX_LEFT,
-        GX_TRANSFER_FLIP_VERT(0) | GX_TRANSFER_OUT_TILED(0) |
-        GX_TRANSFER_IN_FORMAT(GX_TRANSFER_FMT_RGB565) |
-        GX_TRANSFER_OUT_FORMAT(GX_TRANSFER_FMT_RGB8) |
-        GX_TRANSFER_SCALING(GX_TRANSFER_SCALE_NO));
-
+    if (!C3D_TexInitVRAM(&s_target_tex, 240, 400, GPU_RGB565)) { printf("[native] target TexInitVRAM failed\n"); return -1; }
+    C3D_TexSetFilter(&s_target_tex, GPU_NEAREST, GPU_NEAREST);
+    C3D_TexSetWrap(&s_target_tex, GPU_CLAMP_TO_EDGE, GPU_CLAMP_TO_EDGE);
+    s_target = C3D_RenderTargetCreateFromTex(&s_target_tex, GPU_TEXFACE_2D, 0, GPU_RB_DEPTH24_STENCIL8);
+    if (!s_target) { printf("[native] RenderTargetCreateFromTex failed\n"); return -1; }
     if (!C3D_TexInit(&s_frame_tex, TEX_WIDTH, TEX_HEIGHT, GPU_RGB565)) {
         printf("[atlas] TexInit failed\n");
         return -1;
@@ -270,7 +266,7 @@ int ds3_render_native_frame(void) {
         memset(s_tex_buf, 0, TEX_WIDTH * TEX_HEIGHT * 2);
         memcpy(s_frame_tex.data, s_tex_buf, TEX_WIDTH * TEX_HEIGHT * 2);
         C3D_TexUpload(&s_frame_tex, s_tex_buf);
-        C3D_FrameBegin(C3D_FRAME_SYNCDRAW);
+        C3D_FrameBegin(0);
         C3D_FrameDrawOn(s_target);
         C3D_RenderTargetClear(s_target, C3D_CLEAR_COLOR, 0, 0);
         /* render tex as fullscreen quad */
@@ -286,6 +282,7 @@ int ds3_render_native_frame(void) {
         C3D_ImmSendAttrib(1.0f, 1.0f, 0.0f, 0.0f);
         C3D_ImmDrawEnd();
         C3D_FrameEnd(GX_CMDLIST_FLUSH);
+        gfxFlushBuffers();
         return 1;
     }
 
@@ -385,11 +382,12 @@ int ds3_render_native_frame(void) {
     C3D_TexUpload(&s_frame_tex, s_tex_buf);
 
     /* Render fullscreen quad */
-    C3D_FrameBegin(C3D_FRAME_SYNCDRAW);
+    C3D_FrameBegin(0);
     C3D_FrameDrawOn(s_target);
     C3D_RenderTargetClear(s_target, C3D_CLEAR_COLOR, 0x0000FFFF, 0);  /* Yellow test */
 
     C3D_FrameEnd(GX_CMDLIST_FLUSH);
+    gfxFlushBuffers();
     return 1;
 }
 
@@ -398,6 +396,7 @@ void ds3_render_native_exit(void) {
     if (s_tex_buf) linearFree(s_tex_buf);
     if (s_shader) DVLB_Free(s_shader);
     shaderProgramFree(&s_shaderProgram);
+    C3D_TexDelete(&s_target_tex);
     C3D_TexDelete(&s_frame_tex);
     if (s_target) C3D_RenderTargetDelete(s_target);
     C3D_Fini();
