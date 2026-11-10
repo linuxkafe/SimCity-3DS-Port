@@ -235,6 +235,18 @@ int ds3_render_native_frame(void) {
 
     if (!frame || fw == 0 || fh == 0) return -1;
 
+    /* DEBUG: log first pixel of core frame */
+    static int dbg_n = 0;
+    if (dbg_n < 5 || dbg_n % 100 == 0) {
+        FILE *dbg = fopen("sdmc:/frame_debug.log", "a");
+        if (dbg) {
+            fprintf(dbg, "render #%d: core[0]=0x%04X 3ds_fb[0]=0x%04X fw=%u fh=%u\n", dbg_n, frame[0], gfxGetFramebuffer(GFX_TOP, GFX_LEFT, NULL, NULL) ? ((uint16_t*)gfxGetFramebuffer(GFX_TOP, GFX_LEFT, NULL, NULL))[0] : 0, fw, fh);
+            fflush(dbg);
+            fclose(dbg);
+        }
+    }
+    dbg_n++;
+
     u16 fb_w = 0, fb_h = 0;
     uint16_t *fb = (uint16_t *)gfxGetFramebuffer(GFX_TOP, GFX_LEFT, &fb_w, &fb_h);
     if (!fb) return -1;
