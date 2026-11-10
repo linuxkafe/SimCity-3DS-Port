@@ -445,9 +445,15 @@ SimCityRecompFrameResult ds3_advance_frame(void) {
        then B every 20 frames (T048 cadence) */
     static uint32_t auto_nav_frame = 0;
     auto_nav_frame++;
-    if (auto_nav_frame == 60) input |= 0x1000;  /* Start */
-    if (auto_nav_frame == 120) input |= 0x0080; /* A */
-    if (auto_nav_frame > 180 && (auto_nav_frame - 180) % 20 == 0) input |= 0x8000;  /* B */
+    /* Hold Start for frames 60-65 */
+    if (auto_nav_frame >= 60 && auto_nav_frame <= 65) input |= 0x1000;  /* Start */
+    /* Hold A for frames 120-125 */
+    if (auto_nav_frame >= 120 && auto_nav_frame <= 125) input |= 0x0080; /* A */
+    /* Hold A for frames 200-205 */
+    if (auto_nav_frame >= 200 && auto_nav_frame <= 205) input |= 0x0080; /* A */
+    /* Hold A for frames 300-305 */
+    if (auto_nav_frame >= 300 && auto_nav_frame <= 305) input |= 0x0080; /* A */
+    /* No more auto presses - let the city load */
 
     /* Record what was actually handed to the core, and retire a `tap` pulse
        once it has spanned enough frames to have been sampled. The host reads
