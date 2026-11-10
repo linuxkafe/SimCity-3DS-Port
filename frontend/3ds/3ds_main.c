@@ -393,6 +393,11 @@ int ds3_init(const char *rom_path, char *out_error, size_t error_capacity) {
         return 0;
     }
     ds3_trace("[T3] reset: done");
+    /* Disable dirty-tile render cache so every frame is fully rendered.
+       The cache skips rendering when no tiles changed, which means the 3DS
+       render function is not called and the framebuffer is not updated. */
+    sc_core_set_render_cache_enabled(0);
+    simcity_recomp_set_dirty_render(g_recomp, 0);
 
     /* Free the ROM copy — the core already owns it. */
     free(rom_data);
@@ -432,6 +437,17 @@ SimCityRecompFrameResult ds3_advance_frame(void) {
     uint64_t t_core = svcGetSystemTick();
     uint16_t input = ds3_input_read();
     ds3_input_update_soft_pointer();
+    /* OR in debug-injected input (from tap command) */
+    if (g_dbg_input_frames > 0 || g_dbg_input != 0) {
+        input |= g_dbg_input;
+    }
+    /* Auto-navigate to map: press Start at frame 60, A at frame 120,
+       then B every 20 frames (T048 cadence) */
+    static uint32_t auto_nav_frame = 0;
+    auto_nav_frame++;
+    if (auto_nav_frame == 60) input |= 0x1000;  /* Start */
+    if (auto_nav_frame == 120) input |= 0x0080; /* A */
+    if (auto_nav_frame > 180 && (auto_nav_frame - 180) % 20 == 0) input |= 0x8000;  /* B */
 
     /* Record what was actually handed to the core, and retire a `tap` pulse
        once it has spanned enough frames to have been sampled. The host reads
@@ -546,7 +562,9 @@ SimCityRecompFrameResult ds3_advance_frame(void) {
 
     /* Skip frame conversion in headless/satellite mode for performance */
     if (!g_headless_mode && !g_satellite_mode) {
-        if (frame && fw > 0 && fh > 0 && result.frame_rendered) {
+        if (frame && fw > 0 && fh > 0) {  /* always render (ignore frame_rendered) */
+            FILE *df = fopen("sdmc:/render_debug.log", "a");
+            if (df) { fprintf(df, "calling native render, frame=%p fw=%u fh=%u\n", (void*)frame, fw, fh); fflush(df); fclose(df); }
 #ifdef DS3_USE_NATIVE_RENDER
             ds3_render_native_frame();
 #elif defined(DS3_USE_GPU_RENDER)
@@ -710,6 +728,9 @@ int main(int argc, char **argv) {
      * The third argument (false) keeps framebuffers in linear DRAM, not VRAM —
      * gfxInitDefault's behaviour, and correct for a 240x400 double buffer. */
     gfxInit(GSP_RGB565_OES, GSP_RGB565_OES, false);
+    /* Disable double buffering for simpler framebuffer access */
+    gfxSetDoubleBuffering(GFX_TOP, false);
+    gfxSetDoubleBuffering(GFX_BOTTOM, false);
 
     /* Console on bottom screen only — top screen is reserved for the game frame.
        Placing the text console on the top screen overwrote the framebuffer with

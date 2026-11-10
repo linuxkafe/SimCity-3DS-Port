@@ -145,6 +145,15 @@ void ds3_render_frame(const uint16_t *src,
                       unsigned crop_left,
                       unsigned crop_right) {
     if (!src || !g_top_width || !g_top_height) return;
+    /* Trace: log to file via the debug port is not available here,
+       but we can use a static counter */
+    static unsigned render_count = 0;
+    render_count++;
+    if (render_count <= 5 || render_count % 100 == 0) {
+        /* Write to a trace file on SD card */
+        FILE *tf = fopen("sdmc:/render_trace.log", "a");
+        if (tf) { fprintf(tf, "render #%u src=%p src_w=%u src_h=%u\n", render_count, (void*)src, src_width, src_height); fclose(tf); }
+    }
 
     /* Re-fetch the write pointer every frame: libctru may hand back a
        different buffer after gfxSwapBuffers() (gfx.h:140). Caching it was

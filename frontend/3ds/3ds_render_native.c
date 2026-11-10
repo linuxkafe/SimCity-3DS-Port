@@ -10,6 +10,7 @@
 
 #include "3ds_render_native.h"
 #include "simcity_static_recomp.h"
+#include "3dsdbg.h"
 
 #include <3ds.h>
 #include <citro3d.h>
@@ -60,7 +61,6 @@ static Atlas s_atlas;
 
 /* ── GPU state ── */
 static C3D_RenderTarget *s_target = NULL;
-static C3D_Tex           s_target_tex;
 static C3D_Tex           s_frame_tex;
 static uint16_t         *s_tex_buf = NULL;
 static bool              s_gpu_ready = false;
@@ -83,12 +83,18 @@ static inline uint8_t decode_2bpp(const uint8_t *planes, unsigned bit) {
     return (uint8_t)(((planes[0] >> bit) & 1u) |
                      (((planes[1] >> bit) & 1u) << 1));
 }
+static const uint8_t g_widen6[32] = {
+      0,   2,   4,   6,   8,  10,  12,  14,  16,  18,  20,  22,  24,  26,
+     28,  30,  32,  34,  37,  39,  41,  43,  45,  47,  49,  51,  53,  55,
+     57,  59,  61,  63
+};
+
 static uint16_t cgram_to_rgb565(uint16_t raw) {
-    uint8_t r =  raw & 0x1Fu;
-    uint8_t g = (raw >> 5) & 0x1Fu;
-    uint8_t b = (raw >> 10) & 0x1Fu;
-    uint8_t g6 = (g << 1) | (g >> 4);
-    return (uint16_t)((r << 11) | (g6 << 5) | b);
+    uint8_t r5 = (uint8_t)(raw & 0x1Fu);         /* core's low field   */
+    uint8_t g5 = (uint8_t)((raw >> 5) & 0x1Fu);  /* five bits of green */
+    uint8_t b5 = (uint8_t)((raw >> 10) & 0x1Fu); /* core's high field  */
+    uint8_t g6 = g_widen6[g5];
+    return (uint16_t)((r5 << 11) | (g6 << 5) | b5);
 }
 
 /* ── Atlas hash ── */
@@ -157,13 +163,23 @@ static int atlas_decode(Atlas *a, const uint8_t *vram,
 
 /* ── GPU init ── */
 int ds3_render_native_init(void) {
+    FILE *tf = fopen("sdmc:/native_init_trace.log", "w");
+    if (tf) { fprintf(tf, "init: start\n"); fflush(tf); }
     C3D_Init(C3D_DEFAULT_CMDBUF_SIZE);
+    if (tf) { fprintf(tf, "init: C3D_Init done\n"); fflush(tf); }
 
-    if (!C3D_TexInitVRAM(&s_target_tex, 240, 400, GPU_RGB565)) { printf("[native] target TexInitVRAM failed\n"); return -1; }
-    C3D_TexSetFilter(&s_target_tex, GPU_NEAREST, GPU_NEAREST);
-    C3D_TexSetWrap(&s_target_tex, GPU_CLAMP_TO_EDGE, GPU_CLAMP_TO_EDGE);
-    s_target = C3D_RenderTargetCreateFromTex(&s_target_tex, GPU_TEXFACE_2D, 0, GPU_RB_DEPTH24_STENCIL8);
-    if (!s_target) { printf("[native] RenderTargetCreateFromTex failed\n"); return -1; }
+    s_target = C3D_RenderTargetCreate(240, 400, GPU_RB_RGB565, GPU_RB_DEPTH24_STENCIL8);
+    if (!s_target) {
+        if (tf) { fprintf(tf, "init: RenderTargetCreate FAILED\n"); fflush(tf); fclose(tf); }
+        printf("[atlas] RenderTargetCreate failed\n");
+        return -1;
+    }
+    if (tf) { fprintf(tf, "init: RenderTargetCreate OK\n"); fflush(tf); }
+    C3D_RenderTargetSetOutput(s_target, GFX_TOP, GFX_LEFT,
+        GX_TRANSFER_FLIP_VERT(0) | GX_TRANSFER_OUT_TILED(0) |
+        GX_TRANSFER_IN_FORMAT(GX_TRANSFER_FMT_RGBA8) |
+        GX_TRANSFER_OUT_FORMAT(GX_TRANSFER_FMT_RGB8) |
+        GX_TRANSFER_SCALING(GX_TRANSFER_SCALE_NO));
     if (!C3D_TexInit(&s_frame_tex, TEX_WIDTH, TEX_HEIGHT, GPU_RGB565)) {
         printf("[atlas] TexInit failed\n");
         return -1;
@@ -204,210 +220,67 @@ int ds3_render_native_init(void) {
     memset(&s_atlas, 0, sizeof(s_atlas));
 
     s_gpu_ready = true;
+    if (tf) { fprintf(tf, "init: SUCCESS, s_gpu_ready=1\n"); fflush(tf); fclose(tf); }
     printf("[atlas] GPU tile-render initialized\n");
     return 0;
 }
 
 /* ── Frame render ── */
 int ds3_render_native_frame(void) {
+    FILE *tf = fopen("sdmc:/native_render_trace.log", "a");
+    if (tf) { fprintf(tf, "called: s_gpu_ready=%d g_recomp=%p\n", s_gpu_ready, (void*)g_recomp); fflush(tf); fclose(tf); }
     if (!s_gpu_ready || !g_recomp) return -1;
 
-    /* Read camera */
-    uint8_t wram_x[2], wram_y[2], wram_fx[1], wram_fy[1];
-    simcity_recomp_read_wram(g_recomp, SC_CITY_VIEW_X_OFFSET, wram_x, 2);
-    simcity_recomp_read_wram(g_recomp, SC_CITY_VIEW_Y_OFFSET, wram_y, 2);
-    simcity_recomp_read_wram(g_recomp, SC_CITY_FINE_X_OFFSET, wram_fx, 1);
-    simcity_recomp_read_wram(g_recomp, SC_CITY_FINE_Y_OFFSET, wram_fy, 1);
+    const uint16_t *frame = simcity_recomp_frame_bgr555(g_recomp);
+    unsigned fw = simcity_recomp_frame_width(g_recomp);
+    unsigned fh = SIMCITY_RECOMP_FRAME_HEIGHT;
 
-    int city_view_x = (int16_t)(wram_x[0] | (wram_x[1] << 8));
-    int city_view_y = (int16_t)(wram_y[0] | (wram_y[1] << 8));
-    int fine_x = wram_fx[0] & 7;
-    int fine_y = wram_fy[0] & 7;
+    if (!frame || fw == 0 || fh == 0) return -1;
 
-    int native_cam_x = city_view_x * 8 + fine_x;
-    int native_cam_y = city_view_y * 8 + fine_y;
+    u16 fb_w = 0, fb_h = 0;
+    uint16_t *fb = (uint16_t *)gfxGetFramebuffer(GFX_TOP, GFX_LEFT, &fb_w, &fb_h);
+    if (!fb) return -1;
+    if (fb_w == 0) fb_w = 240;
+    if (fb_h == 0) fb_h = 400;
 
-    /* Read PPU registers */
-    uint8_t mmio[64];
-    simcity_recomp_read_mmio(g_recomp, 0, mmio, 64);
+    unsigned crop_top = 0;
+    unsigned crop_left = 0;
+    unsigned crop_right = 0;
+    unsigned rows = (crop_top < fh) ? (fh - crop_top) : 0u;
+    unsigned row_pixels = (crop_left + crop_right < fw)
+                        ? (fw - crop_left - crop_right) : 0u;
+    if (rows == 0u || row_pixels == 0u) return -1;
 
-    uint8_t bg1sc = mmio[MMIO_BG1SC];
-    uint8_t bg2sc = mmio[MMIO_BG2SC];
-    uint8_t tm    = mmio[MMIO_TM];
-    uint8_t inidisp = mmio[MMIO_INIDISP];
+    const uint16_t *row_src = frame + (size_t)crop_top * fw + crop_left;
 
-    uint16_t bg12nba;
-    {
-        uint8_t tmp[2];
-        simcity_recomp_read_mmio(g_recomp, MMIO_BG12NB, tmp, 2);
-        bg12nba = (uint16_t)(tmp[0] | (tmp[1] << 8));
-    }
+    unsigned dst_h = row_pixels;
+    unsigned dst_w = rows;
+    if (dst_w > fb_w) dst_w = fb_w;
+    if (dst_h > fb_h) dst_h = fb_h;
 
-    uint32_t bg1_tm_base   = (uint32_t)(bg1sc & 0x03u) << 10u;
-    uint32_t bg2_tm_base   = (uint32_t)(bg2sc & 0x03u) << 10u;
-    uint32_t bg1_char_base = (uint32_t)(bg12nba & 0x0Fu) << 12u;
-    uint32_t bg2_char_base = (uint32_t)((bg12nba >> 4u) & 0x0Fu) << 12u;
+    unsigned off_x = (fb_w - dst_w) / 2u;
+    unsigned off_y = (fb_h - dst_h) / 2u;
 
-    /* Read VRAM + CGRAM */
-    static uint8_t vram[SC_VRAM_SIZE];
-    static uint8_t cgram[SC_CGRAM_SIZE];
-    simcity_recomp_read_vram(g_recomp, 0, vram, SC_VRAM_SIZE);
-    simcity_recomp_read_cgram(g_recomp, 0, cgram, SC_CGRAM_SIZE);
+    memset(fb, 0, (size_t)fb_w * fb_h * sizeof(uint16_t));
 
-    /* Build palette LUT */
-    static uint16_t palette_lut[128];
-    for (unsigned pi = 0; pi < 128; ++pi)
-        palette_lut[pi] = cgram_to_rgb565((uint16_t)(cgram[pi*2] | (cgram[pi*2+1] << 8)));
+    const int use_ccw = (g_dbg_rotate_mode == 1);
 
-    s_atlas.frame++;
-
-    /* Forced blank */
-    if (inidisp & 0x80u) {
-        memset(s_tex_buf, 0, TEX_WIDTH * TEX_HEIGHT * 2);
-        memcpy(s_frame_tex.data, s_tex_buf, TEX_WIDTH * TEX_HEIGHT * 2);
-        C3D_TexUpload(&s_frame_tex, s_tex_buf);
-        C3D_FrameBegin(0);
-        C3D_FrameDrawOn(s_target);
-        C3D_RenderTargetClear(s_target, C3D_CLEAR_COLOR, 0, 0);
-        /* render tex as fullscreen quad */
-        C3D_BindProgram(&s_shaderProgram);
-        C3D_SetAttrInfo(&s_attrInfo);
-        C3D_TexBind(0, &s_frame_tex);
-        C3D_ImmDrawBegin(GPU_TRIANGLE_STRIP);
-        C3D_ImmSendAttrib(-1.0f, -1.0f, 0.5f, 0.0f);
-        C3D_ImmSendAttrib(0.0f, 0.0f, 0.0f, 0.0f);
-        C3D_ImmSendAttrib( 1.0f, -1.0f, 0.5f, 1.0f);
-        C3D_ImmSendAttrib(1.0f, 0.0f, 0.0f, 0.0f);
-        C3D_ImmSendAttrib(-1.0f,  1.0f, 0.5f, 0.0f);
-        C3D_ImmSendAttrib(0.0f, 1.0f, 0.0f, 0.0f);
-        C3D_ImmSendAttrib( 1.0f,  1.0f, 0.5f, 1.0f);
-        C3D_ImmSendAttrib(1.0f, 1.0f, 0.0f, 0.0f);
-        C3D_ImmDrawEnd();
-        C3D_FrameEnd(GX_CMDLIST_FLUSH);
-        gfxFlushBuffers();
-        return 1;
-    }
-
-    /* Pre-assemble frame into texture */
-    memset(s_tex_buf, 0, TEX_WIDTH * TEX_HEIGHT * 2);
-
-    int max_map_x = SC_CITY_MAP_WIDTH - 1;
-    int max_map_y = SC_CITY_MAP_HEIGHT - 1;
-
-    for (unsigned y = 0; y < OUTPUT_HEIGHT; ++y) {
-        uint16_t *row = &s_tex_buf[y * TEX_WIDTH];
-        int world_y = native_cam_y + (int)y;
-        int map_y_raw = world_y >> 3;
-        int eff_cell_y = world_y & 7;
-
-        for (unsigned x = 0; x < OUTPUT_WIDTH; ++x) {
-            int world_x = native_cam_x + (int)x;
-            int map_x = world_x >> 3;
-            int cell_x = world_x & 7;
-
-            uint16_t pixel = 0;
-
-            /* BG2 (terrain) */
-            if (tm & 0x04u) {
-                if (map_x >= 0 && map_x <= max_map_x &&
-                    map_y_raw >= 0 && map_y_raw <= max_map_y) {
-                    uint32_t tm_addr = bg2_tm_base + ((uint32_t)map_y_raw * 64u + (uint32_t)(unsigned)map_x) * 2u;
-                    uint16_t entry = vram_read16(vram, tm_addr >> 1);
-                    uint16_t tile = entry & 0x03FFu;
-                    uint8_t pal_group = (uint8_t)((entry >> 10) & 7u);
-                    uint8_t flip_x = (entry >> 14) & 1u;
-                    uint8_t flip_y = (entry >> 15) & 1u;
-
-                    int eff_px = flip_x ? (7 - cell_x) : cell_x;
-                    int eff_py = flip_y ? (7 - eff_cell_y) : eff_cell_y;
-
-                    /* Direct tile decode (no atlas cache) */
-                    {
-                        uint32_t row_addr_base = bg2_char_base + tile * 16u;
-                        uint8_t planes[2];
-                        unsigned src_py = flip_y ? (7 - eff_cell_y) : eff_cell_y;
-                        uint32_t row_addr = row_addr_base + src_py * 2u;
-                        planes[0] = vram[row_addr & (SC_VRAM_SIZE - 1u)];
-                        planes[1] = vram[(row_addr + 1u) & (SC_VRAM_SIZE - 1u)];
-                        unsigned src_px = flip_x ? (7 - cell_x) : cell_x;
-                        uint8_t color = (uint8_t)(((planes[0] >> (7 - src_px)) & 1u) |
-                                                  (((planes[1] >> (7 - src_px)) & 1u) << 1));
-                        if (color) {
-                            unsigned pal_idx = pal_group * 4u + color;
-                            uint16_t tp = palette_lut[pal_idx & 127u];
-                            if (tp) pixel = tp;
-                        }
-                    }
-                }
-            }
-
-            /* BG1 (buildings) on top */
-            if (tm & 0x02u) {
-                if (map_x >= 0 && map_x <= max_map_x &&
-                    map_y_raw >= 0 && map_y_raw <= max_map_y) {
-                    uint32_t tm_addr = bg1_tm_base + ((uint32_t)map_y_raw * 64u + (uint32_t)(unsigned)map_x) * 2u;
-                    uint16_t entry = vram_read16(vram, tm_addr >> 1);
-                    uint16_t tile = entry & 0x03FFu;
-                    uint8_t pal_group = (uint8_t)((entry >> 10) & 7u);
-                    uint8_t flip_x = (entry >> 14) & 1u;
-                    uint8_t flip_y = (entry >> 15) & 1u;
-
-                    int eff_px = flip_x ? (7 - cell_x) : cell_x;
-                    int eff_py = flip_y ? (7 - eff_cell_y) : eff_cell_y;
-
-                    /* Direct tile decode (no atlas cache) */
-                    {
-                        uint32_t row_addr_base = bg1_char_base + tile * 16u;
-                        uint8_t planes[2];
-                        unsigned src_py = flip_y ? (7 - eff_cell_y) : eff_cell_y;
-                        uint32_t row_addr = row_addr_base + src_py * 2u;
-                        planes[0] = vram[row_addr & (SC_VRAM_SIZE - 1u)];
-                        planes[1] = vram[(row_addr + 1u) & (SC_VRAM_SIZE - 1u)];
-                        unsigned src_px = flip_x ? (7 - cell_x) : cell_x;
-                        uint8_t color = (uint8_t)(((planes[0] >> (7 - src_px)) & 1u) |
-                                                  (((planes[1] >> (7 - src_px)) & 1u) << 1));
-                        if (color) {
-                            unsigned pal_idx = pal_group * 4u + color;
-                            uint16_t tp = palette_lut[pal_idx & 127u];
-                            if (tp) pixel = tp;
-                        }
-                    }
-                }
-            }
-
-            row[x] = pixel;
+    for (unsigned dy = 0; dy < dst_h; dy++) {
+        for (unsigned dx = 0; dx < dst_w; dx++) {
+            unsigned sy = use_ccw ? dx : (rows - 1u - dx);
+            unsigned sx = dy;
+            if (sy >= rows)   sy = rows - 1u;
+            if (sx >= row_pixels) sx = row_pixels - 1u;
+            uint16_t pixel = row_src[(size_t)sy * row_pixels + sx];
+            uint8_t lo  = (uint8_t)(pixel & 0x1Fu);
+            uint8_t g5  = (uint8_t)((pixel >> 5) & 0x1Fu);
+            uint8_t hi  = (uint8_t)((pixel >> 10) & 0x1Fu);
+            uint8_t g6  = g_widen6[g5];
+            uint16_t rgb565 = (uint16_t)((lo << 11) | (g6 << 5) | hi);
+            fb[(size_t)(off_y + dy) * fb_w + (off_x + dx)] = rgb565;
         }
     }
 
-    /* Upload texture */
-    memcpy(s_frame_tex.data, s_tex_buf, TEX_WIDTH * TEX_HEIGHT * 2);
-    C3D_TexUpload(&s_frame_tex, s_tex_buf);
-
-    /* Render fullscreen quad */
-    C3D_FrameBegin(0);
-    C3D_FrameDrawOn(s_target);
-    C3D_RenderTargetClear(s_target, C3D_CLEAR_COLOR, 0, 0);
-
-    C3D_BindProgram(&s_shaderProgram);
-    C3D_SetAttrInfo(&s_attrInfo);
-    C3D_FVUnifSet(GPU_VERTEX_SHADER, s_projLocation + 0, 1.0f, 0.0f, 0.0f, 0.0f);
-    C3D_FVUnifSet(GPU_VERTEX_SHADER, s_projLocation + 1, 0.0f, 1.0f, 0.0f, 0.0f);
-    C3D_FVUnifSet(GPU_VERTEX_SHADER, s_projLocation + 2, 0.0f, 0.0f, 1.0f, 0.0f);
-    C3D_FVUnifSet(GPU_VERTEX_SHADER, s_projLocation + 3, 0.0f, 0.0f, 0.0f, 1.0f);
-
-    C3D_TexBind(0, &s_frame_tex);
-    C3D_ImmDrawBegin(GPU_TRIANGLE_STRIP);
-    C3D_ImmSendAttrib(-1.0f, -1.0f, 0.5f, 0.0f);
-    C3D_ImmSendAttrib(0.0f, 0.0f, 0.0f, 0.0f);
-    C3D_ImmSendAttrib( 1.0f, -1.0f, 0.5f, 1.0f);
-    C3D_ImmSendAttrib(1.0f, 0.0f, 0.0f, 0.0f);
-    C3D_ImmSendAttrib(-1.0f,  1.0f, 0.5f, 0.0f);
-    C3D_ImmSendAttrib(0.0f, 1.0f, 0.0f, 0.0f);
-    C3D_ImmSendAttrib( 1.0f,  1.0f, 0.5f, 1.0f);
-    C3D_ImmSendAttrib(1.0f, 1.0f, 0.0f, 0.0f);
-    C3D_ImmDrawEnd();
-
-    C3D_FrameEnd(GX_CMDLIST_FLUSH);
     gfxFlushBuffers();
     return 1;
 }
@@ -417,7 +290,6 @@ void ds3_render_native_exit(void) {
     if (s_tex_buf) linearFree(s_tex_buf);
     if (s_shader) DVLB_Free(s_shader);
     shaderProgramFree(&s_shaderProgram);
-    C3D_TexDelete(&s_target_tex);
     C3D_TexDelete(&s_frame_tex);
     if (s_target) C3D_RenderTargetDelete(s_target);
     C3D_Fini();
