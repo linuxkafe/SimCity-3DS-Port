@@ -227,8 +227,6 @@ int ds3_render_native_init(void) {
 
 /* ── Frame render ── */
 int ds3_render_native_frame(void) {
-    FILE *tf = fopen("sdmc:/native_render_trace.log", "a");
-    if (tf) { fprintf(tf, "called: s_gpu_ready=%d g_recomp=%p\n", s_gpu_ready, (void*)g_recomp); fflush(tf); fclose(tf); }
     if (!s_gpu_ready || !g_recomp) return -1;
 
     const uint16_t *frame = simcity_recomp_frame_bgr555(g_recomp);
