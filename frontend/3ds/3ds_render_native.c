@@ -273,7 +273,7 @@ int ds3_render_native_frame(void) {
 
     memset(fb, 0, (size_t)fb_w * fb_h * sizeof(uint16_t));
 
-    const int use_ccw = (g_dbg_rotate_mode == 1);
+    const int use_ccw = (g_dbg_rotate_mode != 1);  /* inverted: was 180 off */
 
     for (unsigned dy = 0; dy < dst_h; dy++) {
         for (unsigned dx = 0; dx < dst_w; dx++) {
