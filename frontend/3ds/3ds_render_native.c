@@ -235,18 +235,6 @@ int ds3_render_native_frame(void) {
 
     if (!frame || fw == 0 || fh == 0) return -1;
 
-    /* DEBUG: log first pixel of core frame */
-    static int dbg_n = 0;
-    if (dbg_n < 5 || dbg_n % 100 == 0) {
-        FILE *dbg = fopen("sdmc:/frame_debug.log", "a");
-        if (dbg) {
-            fprintf(dbg, "render #%d: core[0]=0x%04X 3ds_fb[0]=0x%04X fw=%u fh=%u\n", dbg_n, frame[0], gfxGetFramebuffer(GFX_TOP, GFX_LEFT, NULL, NULL) ? ((uint16_t*)gfxGetFramebuffer(GFX_TOP, GFX_LEFT, NULL, NULL))[0] : 0, fw, fh);
-            fflush(dbg);
-            fclose(dbg);
-        }
-    }
-    dbg_n++;
-
     u16 fb_w = 0, fb_h = 0;
     uint16_t *fb = (uint16_t *)gfxGetFramebuffer(GFX_TOP, GFX_LEFT, &fb_w, &fb_h);
     if (!fb) return -1;
@@ -272,6 +260,7 @@ int ds3_render_native_frame(void) {
     unsigned off_y = (fb_h - dst_h) / 2u;
 
     memset(fb, 0, (size_t)fb_w * fb_h * sizeof(uint16_t));
+    memset(s_tex_buf, 0, TEX_WIDTH * TEX_HEIGHT * 2);
 
     /* 180-degree rotation: flip both axes */
     for (unsigned dy = 0; dy < dst_h; dy++) {
@@ -287,14 +276,41 @@ int ds3_render_native_frame(void) {
             uint8_t g6  = g_widen6[g5];
             uint16_t rgb565 = (uint16_t)((lo << 11) | (g6 << 5) | hi);
             fb[(size_t)(off_y + dy) * fb_w + (off_x + dx)] = rgb565;
+            /* Also write to texture buffer for GPU rendering */
+            if (dy < TEX_HEIGHT && dx < TEX_WIDTH) {
+                s_tex_buf[dy * TEX_WIDTH + dx] = rgb565;
+            }
         }
     }
 
-    /* Also render to GPU for emulator display (zelda3 method) */
+    /* Upload texture to GPU */
+    C3D_TexUpload(&s_frame_tex, s_tex_buf);
+
+    /* Render fullscreen quad to GPU (zelda3 method) */
     if (s_target) {
         C3D_FrameBegin(0);
         C3D_FrameDrawOn(s_target);
         C3D_RenderTargetClear(s_target, C3D_CLEAR_COLOR, 0, 0);
+
+        C3D_BindProgram(&s_shaderProgram);
+        C3D_SetAttrInfo(&s_attrInfo);
+        C3D_FVUnifSet(GPU_VERTEX_SHADER, s_projLocation + 0, 1.0f, 0.0f, 0.0f, 0.0f);
+        C3D_FVUnifSet(GPU_VERTEX_SHADER, s_projLocation + 1, 0.0f, 1.0f, 0.0f, 0.0f);
+        C3D_FVUnifSet(GPU_VERTEX_SHADER, s_projLocation + 2, 0.0f, 0.0f, 1.0f, 0.0f);
+        C3D_FVUnifSet(GPU_VERTEX_SHADER, s_projLocation + 3, 0.0f, 0.0f, 0.0f, 1.0f);
+
+        C3D_TexBind(0, &s_frame_tex);
+        C3D_ImmDrawBegin(GPU_TRIANGLE_STRIP);
+        C3D_ImmSendAttrib(-1.0f, -1.0f, 0.5f, 0.0f);
+        C3D_ImmSendAttrib(0.0f, 0.0f, 0.0f, 0.0f);
+        C3D_ImmSendAttrib( 1.0f, -1.0f, 0.5f, 1.0f);
+        C3D_ImmSendAttrib(1.0f, 0.0f, 0.0f, 0.0f);
+        C3D_ImmSendAttrib(-1.0f,  1.0f, 0.5f, 0.0f);
+        C3D_ImmSendAttrib(0.0f, 1.0f, 0.0f, 0.0f);
+        C3D_ImmSendAttrib( 1.0f,  1.0f, 0.5f, 1.0f);
+        C3D_ImmSendAttrib(1.0f, 1.0f, 0.0f, 0.0f);
+        C3D_ImmDrawEnd();
+
         C3D_FrameEnd(GX_CMDLIST_FLUSH);
     }
     gfxFlushBuffers();
