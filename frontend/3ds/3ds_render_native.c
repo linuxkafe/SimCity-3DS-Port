@@ -273,12 +273,11 @@ int ds3_render_native_frame(void) {
 
     memset(fb, 0, (size_t)fb_w * fb_h * sizeof(uint16_t));
 
-    const int use_ccw = (g_dbg_rotate_mode != 1);  /* inverted: was 180 off */
-
+    /* 180-degree rotation: flip both axes */
     for (unsigned dy = 0; dy < dst_h; dy++) {
         for (unsigned dx = 0; dx < dst_w; dx++) {
-            unsigned sy = use_ccw ? dx : (rows - 1u - dx);
-            unsigned sx = dy;
+            unsigned sy = rows - 1u - dx;
+            unsigned sx = row_pixels - 1u - dy;
             if (sy >= rows)   sy = rows - 1u;
             if (sx >= row_pixels) sx = row_pixels - 1u;
             uint16_t pixel = row_src[(size_t)sy * row_pixels + sx];
