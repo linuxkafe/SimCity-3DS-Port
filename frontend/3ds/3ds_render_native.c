@@ -280,6 +280,8 @@ int ds3_render_native_frame(void) {
     }
 
     gfxFlushBuffers();
+    gfxSwapBuffers();
+    gspWaitForVBlank();
     return 1;
 }
 
