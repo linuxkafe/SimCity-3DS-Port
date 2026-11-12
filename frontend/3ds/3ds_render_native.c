@@ -290,6 +290,13 @@ int ds3_render_native_frame(void) {
         }
     }
 
+    /* Also render to GPU for emulator display (zelda3 method) */
+    if (s_target) {
+        C3D_FrameBegin(0);
+        C3D_FrameDrawOn(s_target);
+        C3D_RenderTargetClear(s_target, C3D_CLEAR_COLOR, 0, 0);
+        C3D_FrameEnd(GX_CMDLIST_FLUSH);
+    }
     gfxFlushBuffers();
     return 1;
 }
