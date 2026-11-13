@@ -33,7 +33,7 @@
 #include <fcntl.h>      /* O_NONBLOCK, F_SETFL */
 #include <errno.h>
 
-#define FTP_PORT        5000
+#define FTP_PORT        5003
 #define FTP_BACKLOG     2
 #define FTP_LINE_MAX    1024
 #define FTP_XFER_CHUNK  16384   /* bytes moved per poll; bounds loop stall */

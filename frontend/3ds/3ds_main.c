@@ -697,14 +697,25 @@ static void ds3_net_service_start(int force) {
     if (!force && (++s_tick % 60u) != 0) return;
     if (s_dbg_up && s_ftp_up) return;
 
-    if (!s_dbg_up && dbgk_init()) {
-        s_dbg_up = 1;
-        printf("\x1b[1;32m[NET] debug bridge OK, port 5002\x1b[0m\n");
+    FILE *tf = fopen("sdmc:/netsvc_trace.log", "a");
+    if (tf) { fprintf(tf, "ds3_net_service_start force=%d s_dbg_up=%d s_ftp_up=%d\n", force, s_dbg_up, s_ftp_up); fflush(tf); }
+
+    /* Try FTP first, then debug bridge */
+    if (!s_ftp_up) {
+        if (tf) { fprintf(tf, "trying ds3ftp_init first...\n"); fflush(tf); }
+        if (ds3ftp_init()) {
+            s_ftp_up = 1;
+            if (tf) { fprintf(tf, "ds3ftp_init succeeded\n"); fflush(tf); }
+        } else {
+            if (tf) { fprintf(tf, "ds3ftp_init FAILED\n"); fflush(tf); }
+        }
     }
-    if (s_dbg_up && !s_ftp_up && ds3ftp_init()) {
-        s_ftp_up = 1;
-        printf("\x1b[1;32m[NET] FTP OK, port 5000\x1b[0m\n");
+    if (!s_dbg_up) {
+        if (dbgk_init()) {
+            s_dbg_up = 1;
+        }
     }
+    if (tf) { fprintf(tf, "done, s_dbg_up=%d s_ftp_up=%d\n", s_dbg_up, s_ftp_up); fflush(tf); fclose(tf); }
 #else
     (void)force;
 #endif

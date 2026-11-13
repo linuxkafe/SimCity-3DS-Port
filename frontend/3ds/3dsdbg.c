@@ -1019,19 +1019,28 @@ bool dbgk_init(void) {
         static bool s_acu_ok = false;
         static bool s_ndmu_locked = false;
         if (!s_acu_ok) {
+#ifdef DS3_EMU_MODE
+            s_acu_ok = true;
+#else
             Result rc = acInit();
             if (R_SUCCEEDED(rc)) s_acu_ok = true;
             else {
                 printf("[dbgk] acInit failed: 0x%08X\n", (unsigned)acInit());
                 return false;
             }
+#endif
         }
 
         u32 wifi = 0;
+        /* In emulator mode, skip Wi-Fi check (emulator has no Wi-Fi) */
+#ifdef DS3_EMU_MODE
+        wifi = 1;
+#else
         if (R_FAILED(ACU_GetWifiStatus(&wifi)) || !wifi) {
             printf("[dbgk] waiting for Wi-Fi...\n");
             return false;
         }
+#endif
 
         /* mtheall/ftpd: allocate soc:u buffer only after Wi-Fi is up */
         g_soc_buffer = (u32 *)memalign(DBGK_SOC_ALIGN, DBGK_SOC_BUFSIZE);
@@ -1051,6 +1060,7 @@ bool dbgk_init(void) {
 /* mtheall/ftpd: prevent sleep during network operations */
         aptSetSleepAllowed(false);
 
+#ifndef DS3_EMU_MODE
         /* mtheall/ftpd: take exclusive NDM state for network operations */
         Result rc_ndm = NDMU_EnterExclusiveState(NDM_EXCLUSIVE_STATE_INFRASTRUCTURE);
         if (R_FAILED(rc_ndm)) {
@@ -1064,11 +1074,14 @@ bool dbgk_init(void) {
             NDMU_LeaveExclusiveState();
             return false;
         }
+#endif
 
+#ifndef DS3_EMU_MODE
         /* mtheall/ftpd: register APT hook for suspend/resume handling */
         static aptHookCookie s_dbgk_apt_hook;
         aptHook(&s_dbgk_apt_hook, dbgk_apt_hook, NULL);
         printf("[dbgk] aptHook registered for suspend/resume\n");
+#endif
 
         printf("[dbgk] soc:u up, Wi-Fi ready\n");
     }
