@@ -728,9 +728,9 @@ int main(int argc, char **argv) {
      * The third argument (false) keeps framebuffers in linear DRAM, not VRAM —
      * gfxInitDefault's behaviour, and correct for a 240x400 double buffer. */
     gfxInit(GSP_RGB565_OES, GSP_RGB565_OES, false);
-    /* Enable double buffering for emulator display compatibility */
-    gfxSetDoubleBuffering(GFX_TOP, true);
-    gfxSetDoubleBuffering(GFX_BOTTOM, true);
+    /* Disable double buffering for simpler framebuffer access */
+    gfxSetDoubleBuffering(GFX_TOP, false);
+    gfxSetDoubleBuffering(GFX_BOTTOM, false);
 
     /* Console on bottom screen only — top screen is reserved for the game frame.
        Placing the text console on the top screen overwrote the framebuffer with
